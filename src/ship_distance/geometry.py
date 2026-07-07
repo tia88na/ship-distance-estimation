@@ -24,11 +24,7 @@ Temel işlem sırası:
 4. Kamera yüksekliği kullanılarak bu kesişim noktasına olan yaklaşık mesafe
    hesaplanır.
 """
-"""
-Bu hesaplar gerçek dünyada dalga, kamera titreşimi, lens bozulması, atmosferik
-etki ve sensör hatalarından etkilenebilir.Bu yüzden sonuçlar mutlak ölçüm
-değil, yaklaşık mesafe tahmini olarak değerlendirilmelidir.
-"""
+
 
 PROCESS_WIDTH = 1280
 PROCESS_HEIGHT = 720
