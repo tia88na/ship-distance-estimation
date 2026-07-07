@@ -25,7 +25,7 @@ Temel işlem sırası:
    hesaplanır.
 
 Bu hesaplar gerçek dünyada dalga, kamera titreşimi, lens bozulması, atmosferik
-etki ve sensor hatalarından etkilenebilir. Bu yüzden sonuçlar mutlak ölçüm
+etki ve sensör hatalarından etkilenebilir. Bu yüzden sonuçlar mutlak ölçüm
 değil, yaklaşık mesafe tahmini olarak değerlendirilmelidir.
 """
 
