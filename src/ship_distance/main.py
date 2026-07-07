@@ -40,22 +40,18 @@ from ship_distance.visualizer import (
 )
 
 
-RECORD_NAME = "2025_05_25-18_01_10"
-# RECORD_NAME = "2025_05_27-17_41_33"
-# RECORD_NAME ="2025_05_25-21_39_25"
-# RECORD_NAME ="2025_05_16-11_56_52"
-# RECORD_NAME = "2025_05_24-13_18_01"
-# RECORD_NAME = "2025_05_30-15_55_55"
-# RECORD_NAME = "2025_05_22-10_05_16"
-RECORD_NAME = "2025_05_25-21_38_27"
-RECORD_ROOT = "/home/tuana/records_work/Records_all"
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
+CONFIG = AppConfig.from_yaml(CONFIG_PATH)
 
-RGB_VIDEO_PATH = f"{RECORD_ROOT}/{RECORD_NAME}/rgb.mp4"
-THERMAL_VIDEO_PATH = f"{RECORD_ROOT}/{RECORD_NAME}/thermal.mp4"
+RECORD_NAME = CONFIG.record.name
+RECORD_ROOT = CONFIG.record.root
+
+RGB_VIDEO_PATH = CONFIG.paths.rgb_video
+THERMAL_VIDEO_PATH = CONFIG.paths.thermal_video
 VIDEO_PATH = RGB_VIDEO_PATH
-CSV_PATH = f"{RECORD_ROOT}/{RECORD_NAME}/sensor_data.csv"
+CSV_PATH = CONFIG.paths.sensor_csv
 
-OUTPUT_DIR = "/home/tuana/video_distance_outputs"
+OUTPUT_DIR = CONFIG.paths.output_dir
 OUTPUT_VIDEO_NAME = f"{RECORD_NAME}_rgb_thermal_clean_independent_distance.mp4"
 
 SAVE_OUTPUT_VIDEO = True
@@ -74,7 +70,7 @@ PROCESS_HEIGHT = 720
 CX = PROCESS_WIDTH / 2.0
 CY = PROCESS_HEIGHT / 2.0
 
-CAMERA_HEIGHT_M = 10.0
+CAMERA_HEIGHT_M = CONFIG.camera.height_m
 
 DEFAULT_FOV_H_DEG = 65.7
 DEFAULT_FOV_V_DEG = 39.9
@@ -94,7 +90,7 @@ MAX_SEA_DISTANCE_M = math.sqrt(
 MIN_BETA_RAD = math.radians(0.015)
 MIN_VALID_DISTANCE_M = 5.0
 
-YOLO_MODEL_PATH = "yolov8x.pt"
+YOLO_MODEL_PATH = CONFIG.model.yolo_path
 YOLO_CONF_FULL = 0.35
 YOLO_CONF_DEEP = 0.28
 YOLO_IOU_THRES = 0.50
