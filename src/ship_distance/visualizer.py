@@ -1,4 +1,32 @@
+import math
+from pathlib import Path
+
+from ship_distance.config import AppConfig
+from ship_distance.detector import THERMAL_YOLO_CONF_DEEP
+from ship_distance.geometry import focal_from_fov
+from ship_distance.sensor_reader import get_sensor_for_time
+
+
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
+CONFIG = AppConfig.from_yaml(CONFIG_PATH)
+
+RECORD_NAME = CONFIG.record.name
+CAMERA_HEIGHT_M = CONFIG.camera.height_m
+
+EARTH_RADIUS_M = 6_371_000.0
+REFRACTION_FACTOR = 7.0 / 6.0
+EFFECTIVE_EARTH_RADIUS_M = EARTH_RADIUS_M * REFRACTION_FACTOR
+MAX_SEA_DISTANCE_M = math.sqrt(
+    2.0 * EFFECTIVE_EARTH_RADIUS_M * CAMERA_HEIGHT_M
+)
+
+DEFAULT_FOV_H_DEG = CONFIG.camera.rgb_fov_h_deg
+DEFAULT_FOV_V_DEG = CONFIG.camera.rgb_fov_v_deg
+DEFAULT_THERMAL_FOV_H_DEG = CONFIG.camera.thermal_fov_h_deg
+DEFAULT_THERMAL_FOV_V_DEG = CONFIG.camera.thermal_fov_v_deg
+
 """Visualization helpers for drawing tracks, labels, panels, and output frames."""
+
 
 import cv2
 import numpy as np

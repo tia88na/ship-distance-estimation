@@ -1,9 +1,13 @@
-"""Video stream processing helpers for RGB and thermal frames."""
+import math
 
-import cv2
+import numpy as np
 
-from ship_distance.detector import detect_boats
-from ship_distance.geometry import create_horizon_state, update_horizon
+from ship_distance.detector import build_search_regions, detect_boats
+from ship_distance.geometry import (
+    create_horizon_state,
+    focal_from_fov,
+    update_horizon,
+)
 from ship_distance.sensor_reader import get_sensor_for_time, smooth_sensor
 from ship_distance.tracker import (
     active_track_count,
@@ -13,6 +17,16 @@ from ship_distance.tracker import (
     should_run_detection,
     update_tracks,
 )
+from ship_distance.visualizer import (
+    PANEL_HEIGHT,
+    draw_text_bg,
+    ensure_bgr_frame,
+)
+
+
+"""Video stream processing helpers for RGB and thermal frames."""
+
+import cv2
 
 
 PROCESS_WIDTH = 1280

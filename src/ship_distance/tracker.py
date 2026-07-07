@@ -1,3 +1,6 @@
+from ship_distance.geometry import clamp_horizon_y
+
+
 """Tracking, KLT motion, and range smoothing helpers."""
 
 from collections import deque
