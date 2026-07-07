@@ -1,12 +1,14 @@
+# ruff: noqa: ANN001, ANN201
 import bisect
+from collections import deque
 import csv
 import math
-from collections import deque
 from pathlib import Path
 from statistics import median
 
 import cv2
 import numpy as np
+
 
 try:
     import torch
@@ -23,13 +25,13 @@ except ImportError:
     YOLO_AVAILABLE = False
 
 
-#RECORD_NAME ="2025_05_25-18_01_10"
-#RECORD_NAME = "2025_05_27-17_41_33"
-#RECORD_NAME ="2025_05_25-21_39_25"
-#RECORD_NAME ="2025_05_16-11_56_52"
-#RECORD_NAME = "2025_05_24-13_18_01"
-#RECORD_NAME = "2025_05_30-15_55_55"
-#RECORD_NAME = "2025_05_22-10_05_16"
+# RECORD_NAME ="2025_05_25-18_01_10"
+# RECORD_NAME = "2025_05_27-17_41_33"
+# RECORD_NAME ="2025_05_25-21_39_25"
+# RECORD_NAME ="2025_05_16-11_56_52"
+# RECORD_NAME = "2025_05_24-13_18_01"
+# RECORD_NAME = "2025_05_30-15_55_55"
+# RECORD_NAME = "2025_05_22-10_05_16"
 RECORD_NAME = "2025_05_25-21_38_27"
 RECORD_ROOT = "/home/tuana/records_work/Records_all"
 
@@ -69,9 +71,7 @@ EARTH_RADIUS_M = 6371000.0
 REFRACTION_K = 0.13
 EFFECTIVE_EARTH_RADIUS_M = EARTH_RADIUS_M / (1.0 - REFRACTION_K)
 
-HORIZON_DIP_RAD = math.sqrt(
-    2.0 * CAMERA_HEIGHT_M / EFFECTIVE_EARTH_RADIUS_M
-)
+HORIZON_DIP_RAD = math.sqrt(2.0 * CAMERA_HEIGHT_M / EFFECTIVE_EARTH_RADIUS_M)
 MAX_SEA_DISTANCE_M = math.sqrt(
     2.0 * EFFECTIVE_EARTH_RADIUS_M * CAMERA_HEIGHT_M
 )
@@ -282,7 +282,6 @@ def normalize_fov(value, default_value):
     return value
 
 
-
 def channel_column_names(base_names, channel):
     names = []
 
@@ -322,6 +321,7 @@ def channel_default_fov(channel):
         return DEFAULT_THERMAL_FOV_H_DEG, DEFAULT_THERMAL_FOV_V_DEG
 
     return DEFAULT_FOV_H_DEG, DEFAULT_FOV_V_DEG
+
 
 def load_sensor_csv(csv_path, channel="rgb"):
     csv_file = Path(csv_path)
@@ -391,8 +391,7 @@ def load_sensor_csv(csv_path, channel="rgb"):
         zoom_col = find_column(
             fieldnames,
             channel_column_names(
-                ["zoom", "zoom_value", "camera_zoom", "cam_zoom"],
-                channel,
+                ["zoom", "zoom_value", "camera_zoom", "cam_zoom"], channel
             ),
         )
 
@@ -414,16 +413,14 @@ def load_sensor_csv(csv_path, channel="rgb"):
         roll_col = find_column(
             fieldnames,
             channel_column_names(
-                ["roll", "camera_roll", "roll_angle"],
-                channel,
+                ["roll", "camera_roll", "roll_angle"], channel
             ),
         )
 
         pan_col = find_column(
             fieldnames,
             channel_column_names(
-                ["pan", "camera_pan", "ptz_pan", "pan_angle", "yaw"],
-                channel,
+                ["pan", "camera_pan", "ptz_pan", "pan_angle", "yaw"], channel
             ),
         )
 
@@ -441,8 +438,7 @@ def load_sensor_csv(csv_path, channel="rgb"):
         for index, row in enumerate(reader):
             if time_col:
                 second, first_absolute_time = parse_time_to_seconds(
-                    row.get(time_col),
-                    first_absolute_time,
+                    row.get(time_col), first_absolute_time
                 )
             else:
                 second = float(index)
@@ -572,12 +568,8 @@ def smooth_sensor(previous_sensor, new_sensor):
 
 
 def focal_from_fov(fov_h_deg, fov_v_deg):
-    fx_value = (PROCESS_WIDTH / 2.0) / math.tan(
-        math.radians(fov_h_deg) / 2.0
-    )
-    fy_value = (PROCESS_HEIGHT / 2.0) / math.tan(
-        math.radians(fov_v_deg) / 2.0
-    )
+    fx_value = (PROCESS_WIDTH / 2.0) / math.tan(math.radians(fov_h_deg) / 2.0)
+    fy_value = (PROCESS_HEIGHT / 2.0) / math.tan(math.radians(fov_v_deg) / 2.0)
 
     return fx_value, fy_value
 
@@ -623,10 +615,7 @@ def pixel_row_to_angle(y_value, fy_value):
 
 
 def predict_horizon_y_from_tilt(sensor_info, pitch_bias_rad=0.0):
-    _, fy_value = focal_from_fov(
-        sensor_info["fov_h"],
-        sensor_info["fov_v"],
-    )
+    _, fy_value = focal_from_fov(sensor_info["fov_h"], sensor_info["fov_v"])
     pitch_down = resolve_pitch_down_from_tilt(sensor_info.get("tilt"))
     angle = HORIZON_DIP_RAD - math.radians(pitch_down) + pitch_bias_rad
     angle = max(-1.2, min(1.2, angle))
@@ -684,7 +673,7 @@ def detect_horizon_visual(gray, center_y):
     ws = []
 
     for x_value in range(8, PROCESS_WIDTH - 8, HORIZON_COLUMN_STEP):
-        column = grad[lo:hi, x_value - 2:x_value + 3].mean(axis=1)
+        column = grad[lo:hi, x_value - 2 : x_value + 3].mean(axis=1)
         j_value = int(np.argmax(column))
         strength = float(column[j_value])
 
@@ -751,10 +740,7 @@ def create_horizon_state():
 
 
 def clamp_horizon_y(y_value):
-    return max(
-        PROCESS_HEIGHT * 0.02,
-        min(PROCESS_HEIGHT * 0.90, y_value),
-    )
+    return max(PROCESS_HEIGHT * 0.02, min(PROCESS_HEIGHT * 0.90, y_value))
 
 
 def limit_horizon_step(current_y, target_y, max_step):
@@ -769,12 +755,12 @@ def limit_horizon_step(current_y, target_y, max_step):
     return target_y
 
 
-def update_horizon(horizon_state, gray, sensor_info, frame_index,
-                   camera_moving):
+def update_horizon(
+    horizon_state, gray, sensor_info, frame_index, camera_moving
+):
     target_y = clamp_horizon_y(
         predict_horizon_y_from_tilt(
-            sensor_info,
-            horizon_state["pitch_bias_rad"],
+            sensor_info, horizon_state["pitch_bias_rad"]
         )
     )
 
@@ -807,11 +793,11 @@ def horizon_y_at(horizon_state, x_value):
     return horizon_state["y"] + horizon_state["slope"] * (x_value - CX)
 
 
-def sea_distance_from_image_point(pixel_x, pixel_y, sensor_info,
-                                  horizon_state):
+def sea_distance_from_image_point(
+    pixel_x, pixel_y, sensor_info, horizon_state
+):
     fx_value, fy_value = focal_from_fov(
-        sensor_info["fov_h"],
-        sensor_info["fov_v"],
+        sensor_info["fov_h"], sensor_info["fov_v"]
     )
 
     y_horizon = horizon_y_at(horizon_state, pixel_x)
@@ -953,12 +939,7 @@ def center_x_distance_ratio(box_a, box_b):
 def box_to_int(box):
     x1, y1, x2, y2 = box
 
-    return (
-        int(round(x1)),
-        int(round(y1)),
-        int(round(x2)),
-        int(round(y2)),
-    )
+    return (int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2)))
 
 
 def visible_box(box):
@@ -1075,7 +1056,10 @@ def filter_detection(det, sensor_info, horizon_state):
             return False
         if det["water_y"] > PROCESS_HEIGHT * 0.94:
             return False
-        if det.get("source", "").startswith("thermal_blob") and area < THERMAL_BLOB_MIN_AREA:
+        if (
+            det.get("source", "").startswith("thermal_blob")
+            and area < THERMAL_BLOB_MIN_AREA
+        ):
             return False
     elif aspect < 0.25 or aspect > 18.0:
         return False
@@ -1089,10 +1073,7 @@ def filter_detection(det, sensor_info, horizon_state):
         return False
 
     result = sea_distance_from_image_point(
-        det["water_x"],
-        det["water_y"],
-        sensor_info,
-        horizon_state,
+        det["water_x"], det["water_y"], sensor_info, horizon_state
     )
 
     if (
@@ -1103,6 +1084,7 @@ def filter_detection(det, sensor_info, horizon_state):
         return False
 
     return True
+
 
 def build_search_regions(sensor_info, horizon_state, mode):
     y_h = int(max(10, min(PROCESS_HEIGHT - 40, horizon_state["y"])))
@@ -1208,12 +1190,8 @@ def create_thermal_candidate_mask(crop_gray):
     mean_value = float(np.mean(eq))
     std_value = float(np.std(eq))
 
-    high_percentile = float(
-        np.percentile(eq, THERMAL_BLOB_BRIGHT_PERCENTILE)
-    )
-    low_percentile = float(
-        np.percentile(eq, THERMAL_BLOB_DARK_PERCENTILE)
-    )
+    high_percentile = float(np.percentile(eq, THERMAL_BLOB_BRIGHT_PERCENTILE))
+    low_percentile = float(np.percentile(eq, THERMAL_BLOB_DARK_PERCENTILE))
 
     high_threshold = max(high_percentile, mean_value + 0.45 * std_value)
     low_threshold = min(low_percentile, mean_value - 0.45 * std_value)
@@ -1260,9 +1238,7 @@ def detect_thermal_blobs(frame, sensor_info, horizon_state, mode):
             continue
 
         contours, _ = cv2.findContours(
-            mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
         for contour in contours:
@@ -1297,21 +1273,20 @@ def detect_thermal_blobs(frame, sensor_info, horizon_state, mode):
                 int(min(PROCESS_HEIGHT - 1, y1 + by + bh + pad_y)),
             )
 
-            water_x, water_y = get_water_point_from_box(
-                abs_box,
-                sensor_info,
-            )
+            water_x, water_y = get_water_point_from_box(abs_box, sensor_info)
 
-            patch = crop_gray[by:by + bh, bx:bx + bw]
+            patch = crop_gray[by : by + bh, bx : bx + bw]
             surrounding = crop_gray[
-                max(0, by - bh):min(crop_gray.shape[0], by + 2 * bh),
-                max(0, bx - bw):min(crop_gray.shape[1], bx + 2 * bw),
+                max(0, by - bh) : min(crop_gray.shape[0], by + 2 * bh),
+                max(0, bx - bw) : min(crop_gray.shape[1], bx + 2 * bw),
             ]
 
             if patch.size == 0 or surrounding.size == 0:
                 contrast_score = 0.35
             else:
-                contrast = abs(float(np.mean(patch)) - float(np.mean(surrounding)))
+                contrast = abs(
+                    float(np.mean(patch)) - float(np.mean(surrounding))
+                )
                 contrast_score = max(0.25, min(0.75, contrast / 80.0))
 
             det = {
@@ -1329,8 +1304,16 @@ def detect_thermal_blobs(frame, sensor_info, horizon_state, mode):
     return detections
 
 
-def run_yolo_region(frame, model, region, sensor_info, horizon_state,
-                    conf_thres, imgsz, channel="rgb"):
+def run_yolo_region(
+    frame,
+    model,
+    region,
+    sensor_info,
+    horizon_state,
+    conf_thres,
+    imgsz,
+    channel="rgb",
+):
     region_name, x1, y1, x2, y2 = region
     crop = frame[y1:y2, x1:x2]
 
@@ -1372,10 +1355,7 @@ def run_yolo_region(frame, model, region, sensor_info, horizon_state,
                 int(min(PROCESS_HEIGHT - 1, by2 + y1)),
             )
 
-            water_x, water_y = get_water_point_from_box(
-                abs_box,
-                sensor_info,
-            )
+            water_x, water_y = get_water_point_from_box(abs_box, sensor_info)
 
             det = {
                 "box": abs_box,
@@ -1390,6 +1370,7 @@ def run_yolo_region(frame, model, region, sensor_info, horizon_state,
                 detections.append(det)
 
     return detections
+
 
 def detection_quality_score(det):
     x1, y1, x2, y2 = det["box"]
@@ -1429,10 +1410,7 @@ def same_vessel(det_a, det_b):
 def merge_detection_group(group, sensor_info):
     main_det = max(group, key=detection_quality_score)
 
-    water_x, water_y = get_water_point_from_box(
-        main_det["box"],
-        sensor_info,
-    )
+    water_x, water_y = get_water_point_from_box(main_det["box"], sensor_info)
 
     return {
         "box": main_det["box"],
@@ -1444,11 +1422,7 @@ def merge_detection_group(group, sensor_info):
 
 
 def merge_same_vessel_detections(detections, sensor_info):
-    detections = sorted(
-        detections,
-        key=detection_quality_score,
-        reverse=True,
-    )
+    detections = sorted(detections, key=detection_quality_score, reverse=True)
 
     groups = []
 
@@ -1477,8 +1451,9 @@ def merge_same_vessel_detections(detections, sensor_info):
     return kept
 
 
-def detect_boats(frame, model, sensor_info, horizon_state, mode,
-                 channel="rgb"):
+def detect_boats(
+    frame, model, sensor_info, horizon_state, mode, channel="rgb"
+):
     is_thermal = channel == "thermal"
 
     if is_thermal:
@@ -1519,12 +1494,7 @@ def detect_boats(frame, model, sensor_info, horizon_state, mode,
 
     if is_thermal and not detections:
         detections.extend(
-            detect_thermal_blobs(
-                frame,
-                sensor_info,
-                horizon_state,
-                mode,
-            )
+            detect_thermal_blobs(frame, sensor_info, horizon_state, mode)
         )
 
     if not detections and mode in ("deep", "bottom_deep"):
@@ -1544,34 +1514,22 @@ def detect_boats(frame, model, sensor_info, horizon_state, mode,
 
         if is_thermal and not detections:
             detections.extend(
-                detect_thermal_blobs(
-                    frame,
-                    sensor_info,
-                    horizon_state,
-                    "deep",
-                )
+                detect_thermal_blobs(frame, sensor_info, horizon_state, "deep")
             )
 
     merged = merge_same_vessel_detections(detections, sensor_info)
 
     if is_thermal:
-        merged = sorted(
-            merged,
-            key=detection_quality_score,
-            reverse=True,
-        )[:10]
+        merged = sorted(merged, key=detection_quality_score, reverse=True)[:10]
 
     return merged
+
 
 def estimate_global_motion(previous_gray, current_gray, tracks):
     if previous_gray is None:
         return 0.0, 0.0, False
 
-    mask = np.full(
-        (PROCESS_HEIGHT, PROCESS_WIDTH),
-        255,
-        dtype=np.uint8,
-    )
+    mask = np.full((PROCESS_HEIGHT, PROCESS_WIDTH), 255, dtype=np.uint8)
 
     for track in tracks.values():
         x1, y1, x2, y2 = visible_box(track["box"])
@@ -1579,8 +1537,8 @@ def estimate_global_motion(previous_gray, current_gray, tracks):
         if x2 > x1 and y2 > y1:
             pad = 14
             mask[
-                max(0, y1 - pad):min(PROCESS_HEIGHT, y2 + pad),
-                max(0, x1 - pad):min(PROCESS_WIDTH, x2 + pad),
+                max(0, y1 - pad) : min(PROCESS_HEIGHT, y2 + pad),
+                max(0, x1 - pad) : min(PROCESS_WIDTH, x2 + pad),
             ] = 0
 
     points = cv2.goodFeaturesToTrack(
@@ -1602,11 +1560,7 @@ def estimate_global_motion(previous_gray, current_gray, tracks):
         None,
         winSize=(21, 21),
         maxLevel=3,
-        criteria=(
-            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-            30,
-            0.01,
-        ),
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
     )
 
     if next_points is None or status is None:
@@ -1625,9 +1579,7 @@ def estimate_global_motion(previous_gray, current_gray, tracks):
     dx_med = float(np.median(flow[:, 0]))
     dy_med = float(np.median(flow[:, 1]))
 
-    residual = np.sqrt(
-        (flow[:, 0] - dx_med) ** 2 + (flow[:, 1] - dy_med) ** 2
-    )
+    residual = np.sqrt((flow[:, 0] - dx_med) ** 2 + (flow[:, 1] - dy_med) ** 2)
     keep = residual < max(3.0, float(np.percentile(residual, 75)) + 3.0)
 
     if int(np.sum(keep)) < GLOBAL_MIN_POINTS:
@@ -1643,10 +1595,7 @@ def estimate_global_motion(previous_gray, current_gray, tracks):
 
 
 def rescale_point(x_value, y_value, scale_x, scale_y):
-    return (
-        CX + (x_value - CX) * scale_x,
-        CY + (y_value - CY) * scale_y,
-    )
+    return (CX + (x_value - CX) * scale_x, CY + (y_value - CY) * scale_y)
 
 
 def apply_fov_rescale(tracks, horizon_state, scale_x, scale_y):
@@ -1673,10 +1622,7 @@ def apply_fov_rescale(tracks, horizon_state, scale_x, scale_y):
 
             track["prev_measured_box"] = (qx1, qy1, qx2, qy2)
 
-        vx1, vy1, vx2, vy2 = track.get(
-            "velocity_box",
-            (0.0, 0.0, 0.0, 0.0),
-        )
+        vx1, vy1, vx2, vy2 = track.get("velocity_box", (0.0, 0.0, 0.0, 0.0))
         track["velocity_box"] = (
             vx1 * scale_x,
             vy1 * scale_y,
@@ -1760,11 +1706,7 @@ def apply_klt_to_track(track, previous_gray, current_gray):
         None,
         winSize=(23, 23),
         maxLevel=3,
-        criteria=(
-            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-            30,
-            0.01,
-        ),
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
     )
 
     if points_next is None or status is None:
@@ -1785,9 +1727,7 @@ def apply_klt_to_track(track, previous_gray, current_gray):
     dx_med = float(np.median(flow[:, 0]))
     dy_med = float(np.median(flow[:, 1]))
 
-    residual = np.sqrt(
-        (flow[:, 0] - dx_med) ** 2 + (flow[:, 1] - dy_med) ** 2
-    )
+    residual = np.sqrt((flow[:, 0] - dx_med) ** 2 + (flow[:, 1] - dy_med) ** 2)
     keep = residual < max(8.0, float(np.percentile(residual, 75)) + 8.0)
 
     if int(np.sum(keep)) < KLT_MIN_POINTS:
@@ -1806,9 +1746,7 @@ def apply_klt_to_track(track, previous_gray, current_gray):
         (x1 + dx_value, y1 + dy_value, x2 + dx_value, y2 + dy_value)
     )
 
-    track["klt_points"] = good_next[keep].reshape(-1, 1, 2).astype(
-        np.float32
-    )
+    track["klt_points"] = good_next[keep].reshape(-1, 1, 2).astype(np.float32)
 
     return True
 
@@ -1864,8 +1802,7 @@ def smooth_box(old_box, new_box, alpha):
         return tuple(float(value) for value in new_box)
 
     return tuple(
-        (1.0 - alpha) * old + alpha * new
-        for old, new in zip(old_box, new_box)
+        (1.0 - alpha) * old + alpha * new for old, new in zip(old_box, new_box)
     )
 
 
@@ -1876,8 +1813,7 @@ def refresh_track_water_point(track, sensor_info):
         return
 
     water_x, water_y = get_water_point_from_box(
-        (vx1, vy1, vx2, vy2),
-        sensor_info,
+        (vx1, vy1, vx2, vy2), sensor_info
     )
 
     track["water_hist"].append(water_y)
@@ -1935,24 +1871,28 @@ def track_match_score(det, track):
     )
 
 
-def update_tracks(detections, tracks, next_track_id, previous_gray,
-                  current_gray, sensor_info, detection_was_run,
-                  frame_index, skip_optical, global_flow, global_flow_ok):
+def update_tracks(
+    detections,
+    tracks,
+    next_track_id,
+    previous_gray,
+    current_gray,
+    sensor_info,
+    detection_was_run,
+    frame_index,
+    skip_optical,
+    global_flow,
+    global_flow_ok,
+):
     gdx, gdy = global_flow
 
     for track in tracks.values():
         track["global_frame_index"] = frame_index
-        track["frames_since_update"] = (
-            track.get("frames_since_update", 0) + 1
-        )
+        track["frames_since_update"] = track.get("frames_since_update", 0) + 1
         track["klt_ok"] = False
 
         if not skip_optical:
-            klt_ok = apply_klt_to_track(
-                track,
-                previous_gray,
-                current_gray,
-            )
+            klt_ok = apply_klt_to_track(track, previous_gray, current_gray)
 
             if klt_ok:
                 track["klt_ok"] = True
@@ -1961,13 +1901,9 @@ def update_tracks(detections, tracks, next_track_id, previous_gray,
             else:
                 apply_velocity_prediction(track)
 
-            if (
-                track.get("frames_since_update", 0)
-                % KLT_REINIT_EVERY == 0
-            ):
+            if track.get("frames_since_update", 0) % KLT_REINIT_EVERY == 0:
                 track["klt_points"] = init_klt_points(
-                    current_gray,
-                    track["box"],
+                    current_gray, track["box"]
                 )
 
         refresh_track_water_point(track, sensor_info)
@@ -2020,10 +1956,7 @@ def update_tracks(detections, tracks, next_track_id, previous_gray,
             continue
 
         tracks[next_track_id] = create_new_track(
-            next_track_id,
-            det,
-            current_gray,
-            frame_index,
+            next_track_id, det, current_gray, frame_index
         )
 
         next_track_id += 1
@@ -2061,18 +1994,14 @@ def clamp_range_change(previous_distance, candidate_distance, max_delta):
 
 def calculate_track_distance(track, sensor_info, horizon_state, video_fps):
     raw_result = sea_distance_from_image_point(
-        track["water_x"],
-        track["water_y"],
-        sensor_info,
-        horizon_state,
+        track["water_x"], track["water_y"], sensor_info, horizon_state
     )
 
     if not raw_result["valid"]:
         last = track.get("last_result")
 
-        if (
-            raw_result["reason"] == "at_or_beyond_horizon"
-            and (last is None or not last.get("valid"))
+        if raw_result["reason"] == "at_or_beyond_horizon" and (
+            last is None or not last.get("valid")
         ):
             track["last_result"] = raw_result
             return raw_result
@@ -2117,14 +2046,12 @@ def calculate_track_distance(track, sensor_info, horizon_state, video_fps):
     dt_value = frame_delta / max(video_fps, 1.0)
 
     max_rate = max(
-        RANGE_MIN_RATE_M_PER_SEC,
-        previous_locked * RANGE_RELATIVE_RATE_PER_SEC,
+        RANGE_MIN_RATE_M_PER_SEC, previous_locked * RANGE_RELATIVE_RATE_PER_SEC
     )
     max_delta = max_rate * dt_value
 
     ratio = max(raw_distance, previous_locked) / max(
-        min(raw_distance, previous_locked),
-        1e-6,
+        min(raw_distance, previous_locked), 1e-6
     )
 
     if ratio > MAX_ACCEPTED_RAW_JUMP_RATIO:
@@ -2149,27 +2076,23 @@ def calculate_track_distance(track, sensor_info, horizon_state, video_fps):
             alpha = RANGE_UPDATE_ALPHA_KLT
 
         candidate_distance = (
-            (1.0 - alpha) * previous_locked + alpha * raw_distance
-        )
+            1.0 - alpha
+        ) * previous_locked + alpha * raw_distance
 
     locked_distance = clamp_range_change(
-        previous_locked,
-        candidate_distance,
-        max_delta,
+        previous_locked, candidate_distance, max_delta
     )
 
     locked_distance = max(
-        MIN_VALID_DISTANCE_M,
-        min(MAX_SEA_DISTANCE_M, locked_distance),
+        MIN_VALID_DISTANCE_M, min(MAX_SEA_DISTANCE_M, locked_distance)
     )
 
     track["range_locked_m"] = locked_distance
     track["range_history"].append(locked_distance)
 
     if len(track["range_history"]) >= 5:
-        stable_distance = (
-            0.85 * locked_distance
-            + 0.15 * median(track["range_history"])
+        stable_distance = 0.85 * locked_distance + 0.15 * median(
+            track["range_history"]
         )
     else:
         stable_distance = locked_distance
@@ -2185,10 +2108,7 @@ def calculate_track_distance(track, sensor_info, horizon_state, video_fps):
 
 def any_track_near_bottom(tracks):
     for track in tracks.values():
-        if (
-            track.get("frames_since_update", 0)
-            > TRACK_DRAW_MAX_STALE_FRAMES
-        ):
+        if track.get("frames_since_update", 0) > TRACK_DRAW_MAX_STALE_FRAMES:
             continue
 
         _, _, _, y2 = box_to_int(track["box"])
@@ -2204,8 +2124,7 @@ def active_track_count(tracks):
 
     for track in tracks.values():
         if (
-            track.get("frames_since_update", 0)
-            <= TRACK_DRAW_MAX_STALE_FRAMES
+            track.get("frames_since_update", 0) <= TRACK_DRAW_MAX_STALE_FRAMES
             and track.get("confirmed_updates", 0)
             >= TRACK_MIN_CONFIRMED_UPDATES
         ):
@@ -2214,8 +2133,7 @@ def active_track_count(tracks):
     return count
 
 
-def should_run_detection(frame_index, tracks, camera_moving,
-                         force_detection):
+def should_run_detection(frame_index, tracks, camera_moving, force_detection):
     if camera_moving:
         return False, "camera_moving"
 
@@ -2255,10 +2173,7 @@ def format_distance(distance_m):
 
 def measure_text(text, scale, thickness=1):
     size, base = cv2.getTextSize(
-        text,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        thickness,
+        text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
     )
 
     return size[0], size[1] + base
@@ -2297,26 +2212,25 @@ def place_label(occupied, x_value, y_pref, width, height):
 
     fallback = min(PROCESS_HEIGHT - 6, max(PANEL_HEIGHT + height, y_pref))
     occupied.append(
-        (
-            x_value - 4,
-            fallback - height - 4,
-            x_value + width + 4,
-            fallback + 4,
-        )
+        (x_value - 4, fallback - height - 4, x_value + width + 4, fallback + 4)
     )
 
     return fallback
 
 
-def draw_text_bg(frame, text, org, scale=0.48, color=(0, 255, 255),
-                 bg=(0, 0, 0), thickness=1):
+def draw_text_bg(
+    frame,
+    text,
+    org,
+    scale=0.48,
+    color=(0, 255, 255),
+    bg=(0, 0, 0),
+    thickness=1,
+):
     x_value, y_value = org
 
     size, base = cv2.getTextSize(
-        text,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        thickness,
+        text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
     )
 
     width, height = size
@@ -2361,10 +2275,7 @@ def draw_horizon_line(frame, horizon_state):
 def draw_tracks(frame, tracks, sensor_info, horizon_state, video_fps):
     occupied = []
 
-    ordered = sorted(
-        tracks.items(),
-        key=lambda item: item[1]["water_y"],
-    )
+    ordered = sorted(tracks.items(), key=lambda item: item[1]["water_y"])
 
     for track_id, track in ordered:
         if track["age"] < TRACK_MIN_AGE_TO_DISPLAY:
@@ -2373,16 +2284,16 @@ def draw_tracks(frame, tracks, sensor_info, horizon_state, video_fps):
         if track["confirmed_updates"] < TRACK_MIN_CONFIRMED_UPDATES:
             continue
 
-        if (
-            track.get("frames_since_update", 0)
-            > TRACK_DRAW_MAX_STALE_FRAMES
-        ):
+        if track.get("frames_since_update", 0) > TRACK_DRAW_MAX_STALE_FRAMES:
             continue
 
         if track.get("channel") == "thermal":
             if track.get("conf", 0.0) < THERMAL_YOLO_CONF_DEEP:
                 continue
-            if track.get("confirmed_updates", 0) < TRACK_MIN_CONFIRMED_UPDATES + 1:
+            if (
+                track.get("confirmed_updates", 0)
+                < TRACK_MIN_CONFIRMED_UPDATES + 1
+            ):
                 continue
 
         x1, y1, x2, y2 = visible_box(track["box"])
@@ -2391,10 +2302,7 @@ def draw_tracks(frame, tracks, sensor_info, horizon_state, video_fps):
             continue
 
         result = calculate_track_distance(
-            track,
-            sensor_info,
-            horizon_state,
-            video_fps,
+            track, sensor_info, horizon_state, video_fps
         )
 
         water_x = int(round(track["water_x"]))
@@ -2404,8 +2312,7 @@ def draw_tracks(frame, tracks, sensor_info, horizon_state, video_fps):
         water_y = max(0, min(PROCESS_HEIGHT - 1, water_y))
 
         at_horizon = (
-            not result["valid"]
-            and result["reason"] == "at_or_beyond_horizon"
+            not result["valid"] and result["reason"] == "at_or_beyond_horizon"
         )
 
         if result["valid"]:
@@ -2433,8 +2340,9 @@ def draw_tracks(frame, tracks, sensor_info, horizon_state, video_fps):
         )
 
         label_w, label_h = measure_text(label, 0.50)
-        label_y = place_label(occupied, x1 + 4, max(180, y1 - 8),
-                              label_w, label_h)
+        label_y = place_label(
+            occupied, x1 + 4, max(180, y1 - 8), label_w, label_h
+        )
 
         draw_text_bg(
             frame,
@@ -2479,27 +2387,31 @@ def draw_tracks(frame, tracks, sensor_info, horizon_state, video_fps):
             )
 
 
-def draw_panel(frame, sensor_info, horizon_state, fps, video_second,
-               track_count, mode, camera_moving):
+def draw_panel(
+    frame,
+    sensor_info,
+    horizon_state,
+    fps,
+    video_second,
+    track_count,
+    mode,
+    camera_moving,
+):
     fx_value, fy_value = focal_from_fov(
-        sensor_info["fov_h"],
-        sensor_info["fov_v"],
+        sensor_info["fov_h"], sensor_info["fov_v"]
     )
 
     zoom_text = (
-        "?" if sensor_info["zoom"] is None
-        else f"{sensor_info['zoom']:.4f}"
+        "?" if sensor_info["zoom"] is None else f"{sensor_info['zoom']:.4f}"
     )
     tilt_text = (
-        "?" if sensor_info["tilt"] is None
-        else f"{sensor_info['tilt']:.3f}"
+        "?" if sensor_info["tilt"] is None else f"{sensor_info['tilt']:.3f}"
     )
 
     moving_text = "MOVING" if camera_moving else "stable"
     bias_deg = math.degrees(horizon_state["pitch_bias_rad"])
 
-    cv2.rectangle(frame, (0, 0), (PROCESS_WIDTH, PANEL_HEIGHT),
-                  (0, 0, 0), -1)
+    cv2.rectangle(frame, (0, 0), (PROCESS_WIDTH, PANEL_HEIGHT), (0, 0, 0), -1)
 
     lines = [
         (
@@ -2539,7 +2451,6 @@ def draw_panel(frame, sensor_info, horizon_state, fps, video_second,
         y_value += 31
 
 
-
 def ensure_bgr_frame(frame):
     if frame is None:
         return None
@@ -2571,12 +2482,7 @@ def create_stream_state(name, channel):
 
 
 def process_stream_frame(
-    frame,
-    stream_state,
-    sensor_rows,
-    model,
-    frame_index,
-    video_fps,
+    frame, stream_state, sensor_rows, model, frame_index, video_fps
 ):
     frame = ensure_bgr_frame(frame)
 
@@ -2601,17 +2507,18 @@ def process_stream_frame(
 
     sensor_raw = get_sensor_for_time(sensor_rows, video_second)
     stream_state["sensor_smooth"] = smooth_sensor(
-        stream_state["sensor_smooth"],
-        sensor_raw,
+        stream_state["sensor_smooth"], sensor_raw
     )
     sensor_info = stream_state["sensor_smooth"]
 
     fx_value, fy_value = focal_from_fov(
-        sensor_info["fov_h"],
-        sensor_info["fov_v"],
+        sensor_info["fov_h"], sensor_info["fov_v"]
     )
 
-    if stream_state["previous_fx"] is not None and stream_state["previous_fx"] > 0:
+    if (
+        stream_state["previous_fx"] is not None
+        and stream_state["previous_fx"] > 0
+    ):
         scale_x = fx_value / stream_state["previous_fx"]
         scale_y = fy_value / stream_state["previous_fy"]
     else:
@@ -2634,9 +2541,7 @@ def process_stream_frame(
 
     if not zooming:
         gdx, gdy, gflow_ok = estimate_global_motion(
-            stream_state["previous_gray"],
-            current_gray,
-            stream_state["tracks"],
+            stream_state["previous_gray"], current_gray, stream_state["tracks"]
         )
     else:
         gdx, gdy, gflow_ok = 0.0, 0.0, False
@@ -2751,10 +2656,14 @@ def draw_stream_output(
 
 def make_side_by_side(left_frame, right_frame):
     if left_frame is None:
-        left_frame = np.zeros((PROCESS_HEIGHT, PROCESS_WIDTH, 3), dtype=np.uint8)
+        left_frame = np.zeros(
+            (PROCESS_HEIGHT, PROCESS_WIDTH, 3), dtype=np.uint8
+        )
 
     if right_frame is None:
-        right_frame = np.zeros((PROCESS_HEIGHT, PROCESS_WIDTH, 3), dtype=np.uint8)
+        right_frame = np.zeros(
+            (PROCESS_HEIGHT, PROCESS_WIDTH, 3), dtype=np.uint8
+        )
 
     left_frame = cv2.resize(left_frame, (PROCESS_WIDTH, PROCESS_HEIGHT))
     right_frame = cv2.resize(right_frame, (PROCESS_WIDTH, PROCESS_HEIGHT))

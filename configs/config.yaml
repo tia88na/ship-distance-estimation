@@ -1,0 +1,19 @@
+record:
+  name: "2025_05_25-21_38_27"
+  root: "/home/tuana/records_work/Records_all"
+
+paths:
+  rgb_video: "/home/tuana/records_work/Records_all/2025_05_25-21_38_27/rgb.mp4"
+  thermal_video: "/home/tuana/records_work/Records_all/2025_05_25-21_38_27/thermal.mp4"
+  sensor_csv: "/home/tuana/records_work/Records_all/2025_05_25-21_38_27/sensor_data.csv"
+  output_dir: "/home/tuana/video_distance_outputs"
+
+camera:
+  height_m: 10.0
+  rgb_fov_h_deg: 65.7
+  rgb_fov_v_deg: 39.9
+  thermal_fov_h_deg: 32.4
+  thermal_fov_v_deg: 24.6
+
+model:
+  yolo_path: "yolov8x.pt"
