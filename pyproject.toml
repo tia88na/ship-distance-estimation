@@ -106,3 +106,4 @@ lines-after-imports = 2  # double newline after imports
 "src/ship_distance/detector.py" = ["ANN001", "ANN201"]
 "src/ship_distance/tracker.py" = ["ANN001", "ANN201"]
 "src/ship_distance/visualizer.py" = ["ANN001", "ANN201"]
+"src/ship_distance/video_processor.py" = ["ANN001", "ANN201"]
