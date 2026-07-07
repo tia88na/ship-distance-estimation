@@ -1,5 +1,6 @@
 # ruff: noqa: ANN001, ANN201
 # ruff: noqa: ANN001, ANN201
+from ship_distance.config import AppConfig
 import bisect
 from collections import deque
 import csv
