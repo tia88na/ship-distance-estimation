@@ -7,6 +7,24 @@ from statistics import median
 import cv2
 import numpy as np
 
+# Bu dosya, görüntü üzerindeki piksel konumlarından yaklaşık deniz mesafesi
+# hesaplamak için kullanılan matematiksel yardımcı fonksiyonları içerir.
+#
+# Mesafe tahmini doğrudan görüntüdeki nesne boyutuna göre yapılmaz.
+# Bunun yerine kamera yüksekliği, kamera görüş açısı, tilt bilgisi, horizon
+# konumu ve nesnenin görüntüdeki alt noktası birlikte değerlendirilir.
+#
+# Temel fikir şudur:
+# 1. Kameranın yatay ve dikey FOV değerlerinden focal length hesaplanır.
+# 2. Görüntüdeki bir piksel satırı, optik eksene göre açıya çevrilir.
+# 3. Tilt ve horizon bilgisi ile bakış ışınının deniz düzlemini nerede
+#    kestiği tahmin edilir.
+# 4. Kamera yüksekliği kullanılarak bu kesişim noktasına olan yaklaşık
+#    mesafe hesaplanır.
+#
+# Bu hesaplar gerçek dünyada dalga, kamera titreşimi, lens bozulması,
+# atmosferik etki ve sensor hatalarından etkilenebilir. Bu yüzden sonuçlar
+# mutlak ölçüm değil, yaklaşık mesafe tahmini olarak değerlendirilmelidir.
 
 PROCESS_WIDTH = 1280
 PROCESS_HEIGHT = 720
@@ -41,14 +59,18 @@ HORIZON_TILT_ONLY_MAX_STEP_MOVING_PX = 9.0
 
 HORIZON_MEDIAN_WINDOW = 21
 
-
+# FOV değerini piksel cinsinden focal length değerine çevirir.
+# Kamera kalibrasyonu doğrudan yoksa, görüntü genişliği/yüksekliği ve FOV
+# kullanılarak yaklaşık odak uzaklığı hesaplanabilir.
 def focal_from_fov(fov_h_deg, fov_v_deg):
     fx_value = (PROCESS_WIDTH / 2.0) / math.tan(math.radians(fov_h_deg) / 2.0)
     fy_value = (PROCESS_HEIGHT / 2.0) / math.tan(math.radians(fov_v_deg) / 2.0)
 
     return fx_value, fy_value
 
-
+# Sensor tarafından gelen tilt bilgisini, kameranın aşağı bakış açısına
+# dönüştürür. Mesafe hesabında kameranın denize ne kadar aşağı baktığı
+# kritik olduğu için tilt değeri normalize edilir.
 def resolve_pitch_down_from_tilt(tilt_deg):
     if tilt_deg is None:
         return 0.0
@@ -84,11 +106,15 @@ def sea_distance_from_depression(alpha_rad):
 
     return min(distance, MAX_SEA_DISTANCE_M)
 
-
+# Görüntüdeki bir y piksel konumunu kameranın optik eksenine göre açıya
+# çevirir. Nesnenin alt noktası görüntüde ne kadar aşağıdaysa, kamera ışını
+# deniz düzlemini o kadar yakında keser.
 def pixel_row_to_angle(y_value, fy_value):
     return math.atan((y_value - CY) / fy_value)
 
-
+# Tilt ve FOV bilgilerini kullanarak horizon çizgisinin görüntüde hangi
+# y koordinatına denk geleceğini tahmin eder.
+# Horizon çizgisi, deniz düzlemi mesafe hesabı için referans kabul edilir.
 def predict_horizon_y_from_tilt(sensor_info, pitch_bias_rad=0.0):
     _, fy_value = focal_from_fov(sensor_info["fov_h"], sensor_info["fov_v"])
     pitch_down = resolve_pitch_down_from_tilt(sensor_info.get("tilt"))
@@ -164,7 +190,10 @@ def update_horizon(
 def horizon_y_at(horizon_state, x_value):
     return horizon_state["y"] + horizon_state["slope"] * (x_value - CX)
 
-
+# Görüntüde seçilen bir noktanın deniz yüzeyi üzerinde kameraya yaklaşık
+# uzaklığını hesaplar.
+# Bu fonksiyon; piksel konumu, horizon çizgisi, FOV, tilt ve kamera yüksekliği
+# bilgilerini birlikte kullanır.
 def sea_distance_from_image_point(
     pixel_x, pixel_y, sensor_info, horizon_state
 ):
@@ -229,7 +258,8 @@ def sea_distance_from_image_point(
         "lateral": lateral_m,
     }
 
-
+# Mesafe değerini ekranda okunabilir hale getirir.
+# Kısa mesafeler metre, daha uzun mesafeler kilometre formatında gösterilir.
 def format_distance(distance_m):
     if distance_m is None:
         return "?"
