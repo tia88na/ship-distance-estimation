@@ -1,6 +1,5 @@
 # ruff: noqa: ANN001, ANN201
 # ruff: noqa: ANN001, ANN201
-from ship_distance.config import AppConfig
 import bisect
 from collections import deque
 import csv
@@ -10,6 +9,8 @@ from statistics import median
 
 import cv2
 import numpy as np
+
+from ship_distance.config import AppConfig
 
 
 try:
