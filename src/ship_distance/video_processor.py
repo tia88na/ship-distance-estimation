@@ -169,3 +169,16 @@ def process_stream_frame(
     stream_state["previous_gray"] = current_gray.copy()
 
     return frame, camera_moving
+
+
+class VideoProcessor:
+    """
+    RGB ve termal video akışlarının frame bazlı işlenmesini OOP arayüzü altında
+    toplar.
+
+    Bu class mevcut process akışını değiştirmez. Stream state oluşturma ve
+    frame işleme fonksiyonlarını tek bir yapı altında gösterir.
+    """
+
+    create_stream_state = staticmethod(create_stream_state)
+    process_stream_frame = staticmethod(process_stream_frame)

@@ -702,3 +702,34 @@ def should_run_detection(frame_index, tracks, camera_moving, force_detection):
         return True, "full_only"
 
     return False, "lost_wait"
+
+
+class ShipTracker:
+    """
+    Video boyunca gemi/tekne takibi için kullanılan fonksiyonları OOP arayüzü
+    altında toplar.
+
+    Bu class mevcut tracking akışını değiştirmez. KLT optical flow, global
+    kamera hareketi, detection-track eşleştirme ve mesafe yumuşatma
+    fonksiyonlarını tek bir mantıksal yapı altında gösterir.
+    """
+
+    estimate_global_motion = staticmethod(estimate_global_motion)
+    rescale_point = staticmethod(rescale_point)
+    apply_fov_rescale = staticmethod(apply_fov_rescale)
+    init_klt_points = staticmethod(init_klt_points)
+    apply_klt_to_track = staticmethod(apply_klt_to_track)
+    update_track_velocity = staticmethod(update_track_velocity)
+    shift_track_box = staticmethod(shift_track_box)
+    apply_velocity_prediction = staticmethod(apply_velocity_prediction)
+    smooth_value = staticmethod(smooth_value)
+    smooth_box = staticmethod(smooth_box)
+    refresh_track_water_point = staticmethod(refresh_track_water_point)
+    create_new_track = staticmethod(create_new_track)
+    track_match_score = staticmethod(track_match_score)
+    update_tracks = staticmethod(update_tracks)
+    clamp_range_change = staticmethod(clamp_range_change)
+    calculate_track_distance = staticmethod(calculate_track_distance)
+    any_track_near_bottom = staticmethod(any_track_near_bottom)
+    active_track_count = staticmethod(active_track_count)
+    should_run_detection = staticmethod(should_run_detection)

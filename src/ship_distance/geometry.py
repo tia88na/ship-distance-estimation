@@ -297,3 +297,27 @@ def format_distance(distance_m):
         return f"{distance_m / 1000.0:.2f} km"
 
     return f"{distance_m:.1f} m"
+
+
+class DistanceEstimator:
+    """
+    Mesafe tahmini için kullanılan matematiksel fonksiyonları OOP arayüzü
+    altında toplar.
+
+    Bu class mevcut fonksiyonların çalışma şeklini değiştirmez. Sadece
+    geometry.py içindeki mesafe, horizon ve FOV hesaplarını tek bir mantıksal
+    yapı altında kullanmayı sağlar.
+    """
+
+    focal_from_fov = staticmethod(focal_from_fov)
+    resolve_pitch_down_from_tilt = staticmethod(resolve_pitch_down_from_tilt)
+    sea_distance_from_depression = staticmethod(sea_distance_from_depression)
+    pixel_row_to_angle = staticmethod(pixel_row_to_angle)
+    predict_horizon_y_from_tilt = staticmethod(predict_horizon_y_from_tilt)
+    create_horizon_state = staticmethod(create_horizon_state)
+    clamp_horizon_y = staticmethod(clamp_horizon_y)
+    limit_horizon_step = staticmethod(limit_horizon_step)
+    update_horizon = staticmethod(update_horizon)
+    horizon_y_at = staticmethod(horizon_y_at)
+    sea_distance_from_image_point = staticmethod(sea_distance_from_image_point)
+    format_distance = staticmethod(format_distance)

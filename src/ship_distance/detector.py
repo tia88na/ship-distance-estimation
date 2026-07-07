@@ -716,3 +716,40 @@ def detect_boats(
         merged = sorted(merged, key=detection_quality_score, reverse=True)[:10]
 
     return merged
+
+
+class BoatDetector:
+    """
+    RGB ve termal görüntülerde gemi/tekne tespiti için kullanılan fonksiyonları
+    OOP arayüzü altında toplar.
+
+    Bu class mevcut detection akışını değiştirmez. YOLO tespiti, termal aday
+    çıkarımı, kutu filtreleme ve aynı gemiye ait kutuları birleştirme gibi
+    işlemleri tek bir yapı altında gösterir.
+    """
+
+    get_class_name = staticmethod(get_class_name)
+    calculate_iou = staticmethod(calculate_iou)
+    overlap_ratio_small_inside_large = staticmethod(
+        overlap_ratio_small_inside_large
+    )
+    horizontal_overlap_ratio = staticmethod(horizontal_overlap_ratio)
+    vertical_gap_px = staticmethod(vertical_gap_px)
+    center_x_distance_ratio = staticmethod(center_x_distance_ratio)
+    box_to_int = staticmethod(box_to_int)
+    visible_box = staticmethod(visible_box)
+    clamp_track_box = staticmethod(clamp_track_box)
+    get_waterline_ratio = staticmethod(get_waterline_ratio)
+    get_water_point_from_box = staticmethod(get_water_point_from_box)
+    is_own_ship_box = staticmethod(is_own_ship_box)
+    filter_detection = staticmethod(filter_detection)
+    build_search_regions = staticmethod(build_search_regions)
+    prepare_frame_for_detection = staticmethod(prepare_frame_for_detection)
+    create_thermal_candidate_mask = staticmethod(create_thermal_candidate_mask)
+    detect_thermal_blobs = staticmethod(detect_thermal_blobs)
+    run_yolo_region = staticmethod(run_yolo_region)
+    detection_quality_score = staticmethod(detection_quality_score)
+    same_vessel = staticmethod(same_vessel)
+    merge_detection_group = staticmethod(merge_detection_group)
+    merge_same_vessel_detections = staticmethod(merge_same_vessel_detections)
+    detect_boats = staticmethod(detect_boats)
