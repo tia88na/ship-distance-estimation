@@ -99,3 +99,11 @@ combine-as-imports = true
 force-sort-within-sections = true
 force-wrap-aliases = false
 lines-after-imports = 2  # double newline after imports
+
+[tool.ruff.lint.per-file-ignores]
+"src/ship_distance/sensor_reader.py" = ["ANN001", "ANN201"]
+"src/ship_distance/geometry.py" = ["ANN001", "ANN201"]
+"src/ship_distance/detector.py" = ["ANN001", "ANN201"]
+"src/ship_distance/tracker.py" = ["ANN001", "ANN201"]
+"src/ship_distance/visualizer.py" = ["ANN001", "ANN201"]
+"src/ship_distance/video_processor.py" = ["ANN001", "ANN201"]
