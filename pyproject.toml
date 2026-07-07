@@ -102,3 +102,4 @@ lines-after-imports = 2  # double newline after imports
 
 [tool.ruff.lint.per-file-ignores]
 "src/ship_distance/sensor_reader.py" = ["ANN001", "ANN201"]
+"src/ship_distance/geometry.py" = ["ANN001", "ANN201"]
