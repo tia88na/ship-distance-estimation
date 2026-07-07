@@ -7,24 +7,27 @@ from statistics import median
 import cv2
 import numpy as np
 
-# Bu dosya, görüntü üzerindeki piksel konumlarından yaklaşık deniz mesafesi
-# hesaplamak için kullanılan matematiksel yardımcı fonksiyonları içerir.
-#
-# Mesafe tahmini doğrudan görüntüdeki nesne boyutuna göre yapılmaz.
-# Bunun yerine kamera yüksekliği, kamera görüş açısı, tilt bilgisi, horizon
-# konumu ve nesnenin görüntüdeki alt noktası birlikte değerlendirilir.
-#
-# Temel fikir şudur:
-# 1. Kameranın yatay ve dikey FOV değerlerinden focal length hesaplanır.
-# 2. Görüntüdeki bir piksel satırı, optik eksene göre açıya çevrilir.
-# 3. Tilt ve horizon bilgisi ile bakış ışınının deniz düzlemini nerede
-#    kestiği tahmin edilir.
-# 4. Kamera yüksekliği kullanılarak bu kesişim noktasına olan yaklaşık
-#    mesafe hesaplanır.
-#
-# Bu hesaplar gerçek dünyada dalga, kamera titreşimi, lens bozulması,
-# atmosferik etki ve sensor hatalarından etkilenebilir. Bu yüzden sonuçlar
-# mutlak ölçüm değil, yaklaşık mesafe tahmini olarak değerlendirilmelidir.
+"""
+Bu dosya, görüntü üzerindeki piksel konumlarından yaklaşık deniz mesafesi
+hesaplamak için kullanılan matematiksel yardımcı fonksiyonları içerir.
+
+Mesafe tahmini doğrudan görüntüdeki nesne boyutuna göre yapılmaz. Bunun yerine
+kamera yüksekliği, kamera görüş açısı, tilt bilgisi, horizon konumu ve nesnenin
+görüntüdeki alt noktası birlikte değerlendirilir.
+
+Temel işlem sırası:
+
+1. Kameranın yatay ve dikey FOV değerlerinden focal length hesaplanır.
+2. Görüntüdeki bir piksel satırı, optik eksene göre açıya çevrilir.
+3. Tilt ve horizon bilgisi ile bakış ışınının deniz düzlemini nerede kestiği
+   tahmin edilir.
+4. Kamera yüksekliği kullanılarak bu kesişim noktasına olan yaklaşık mesafe
+   hesaplanır.
+
+Bu hesaplar gerçek dünyada dalga, kamera titreşimi, lens bozulması, atmosferik
+etki ve sensor hatalarından etkilenebilir. Bu yüzden sonuçlar mutlak ölçüm
+değil, yaklaşık mesafe tahmini olarak değerlendirilmelidir.
+"""
 
 PROCESS_WIDTH = 1280
 PROCESS_HEIGHT = 720
