@@ -1,4 +1,5 @@
 # ruff: noqa: ANN001, ANN201
+# ruff: noqa: ANN001, ANN201
 import bisect
 from collections import deque
 import csv
