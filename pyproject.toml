@@ -1,55 +1,14 @@
 [project]
-name = "MMAI_OS"
-version = "v0.5.0"
-last-update = "01.01.2026"
+name = "ship-distance-estimation"
+version = "v0.0.1"
+last-update = "01.07.2026"
 requires-python = "==3.10.12"
 dependencies = [
     "astral>=3.2",
-    "evdev>=1.9.3",
-    "cryptography>=49.0.0",
-    "fiona>=1.10.1",
-    "flask>=3.1.2",
-    "flask-cors>=6.0.2",
-    "geopandas>=1.1.2",
-    "geopy>=2.4.1",
-    "gpuutils>=0.0.2",
-    "h5netcdf>=1.7.3",
     "isort>=7.0.0",
-    "lap>=0.5.12",
-    "nmea2000>=2026.3.0",
-    "norfair>=2.1.1",
-    "nuitka>=4.1.3",
-    "onnx>=1.20.0",
-    "onnx-graphsurgeon>=0.5.8",
-    "pillow>=12.0.0",
     "pre-commit>=4.5.1",
-    "py-spy>=0.4.1",
-    "pyais>=2.14.0",
-    "pynmea2>=1.19.0",
-    "pynvml>=13.0.1",
-    "pyproj>=3.7.1",
-    "pyqt5==5.15.11",
-    "pyqt5-qt5==5.15.14",
-    "pyqt5-sip==12.15.0",
-    "pyqtwebengine==5.15.7",
-    "pyqtwebengine-qt5==5.15.14",
-    "pyserial>=3.5",
-    "pytest>=9.0.2",
-    "python-i18n>=0.3.9",
-    "qrcode>=8.2",
-    "redis>=7.1.0",
-    "safe-exit>=0.1.2",
-    "screeninfo>=0.8.1",
-    "shapely>=2.1.2",
     "toml>=0.10.2",
     "ultralytics>=8.3.241",
-    "websockets>=15.0.1",
-    "xarray>=2025.6.1",
-    "opencv-python==4.12.0.88",
-]
-
-[tool.uv]
-override-dependencies = [
 ]
 
 [tool.black]
@@ -61,7 +20,6 @@ skip-magic-trailing-comma = true
 [tool.ruff]
 line-length = 79
 
-# Exclude pyuic-generated or designer files if any
 exclude = [
     "migrations/**",
     ".venv/**",
@@ -72,36 +30,18 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-# Select only needed checks:
 select = [
-  "N",      # pep8-naming (function/class/variable naming)
-  "D101",   # docstring for classes required
-  "ANN",    # type annotations (parameters + return)
-  "I",      # isort (import sorting)
+  "N",
+  "D101",
+  "ANN",
+  "I",
 ]
 
-# Ignore rules that don't fit your style
-ignore = [
-  "N802",   # allow CamelCase method names (e.g. closeEvent in PyQt)
-  "ANN101", # self param type hint not required
-  "N817",   # allow CamelCase variable names (e.g. self.frame_skip in PyQt)
-  "N814",   # allow CamelCase variable names
-  "N811",   # allow CamelCase variable names
-]
-
-fixable = ["I"] # Allow auto-fixes
+fixable = ["I"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["mm_vision"]
+known-first-party = ["ship_distance"]
 combine-as-imports = true
 force-sort-within-sections = true
 force-wrap-aliases = false
-lines-after-imports = 2  # double newline after imports
-
-[tool.ruff.lint.per-file-ignores]
-"src/ship_distance/sensor_reader.py" = ["ANN001", "ANN201"]
-"src/ship_distance/geometry.py" = ["ANN001", "ANN201"]
-"src/ship_distance/detector.py" = ["ANN001", "ANN201"]
-"src/ship_distance/tracker.py" = ["ANN001", "ANN201"]
-"src/ship_distance/visualizer.py" = ["ANN001", "ANN201"]
-"src/ship_distance/video_processor.py" = ["ANN001", "ANN201"]
+lines-after-imports = 2
