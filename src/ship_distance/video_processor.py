@@ -10,10 +10,9 @@ import math
 from typing import TypeAlias, cast
 
 import cv2
-import numpy as np
-
 from detector import detect_boats
 from geometry import create_horizon_state, focal_from_fov, update_horizon
+import numpy as np
 from sensor_reader import SensorRow, get_sensor_for_time, smooth_sensor
 from tracker import (
     apply_fov_rescale,
@@ -132,8 +131,7 @@ def process_stream_frame(
 
     # Mevcut FOV değerlerinden piksel cinsinden focal length hesaplanır.
     fx_value, fy_value = focal_from_fov(
-        float(sensor_info["fov_h"]),
-        float(sensor_info["fov_v"]),
+        float(sensor_info["fov_h"]), float(sensor_info["fov_v"])
     )
 
     # Önceki focal length değeri varsa FOV/zoom ölçek değişimi hesaplanır.
@@ -156,12 +154,7 @@ def process_stream_frame(
         tracks = cast(TrackMap, stream_state["tracks"])
         horizon_state = cast(HorizonState, stream_state["horizon_state"])
 
-        apply_fov_rescale(
-            tracks,
-            horizon_state,
-            scale_x,
-            scale_y,
-        )
+        apply_fov_rescale(tracks, horizon_state, scale_x, scale_y)
 
     # Bir sonraki frame için focal length değerleri state içinde saklanır.
     stream_state["previous_fx"] = fx_value
@@ -174,9 +167,7 @@ def process_stream_frame(
     # hesaplaması atlanır.
     if not zooming:
         gdx, gdy, gflow_ok = estimate_global_motion(
-            previous_gray,
-            current_gray,
-            tracks,
+            previous_gray, current_gray, tracks
         )
     else:
         gdx, gdy, gflow_ok = 0.0, 0.0, False
@@ -201,11 +192,7 @@ def process_stream_frame(
 
     # Sensör bilgisi ve mevcut frame kullanılarak ufuk durumu güncellenir.
     update_horizon(
-        horizon_state,
-        current_gray,
-        sensor_info,
-        frame_index,
-        camera_moving,
+        horizon_state, current_gray, sensor_info, frame_index, camera_moving
     )
 
     # Varsayılan olarak detection, kamera hareket durumunu dikkate alır.
@@ -230,12 +217,7 @@ def process_stream_frame(
     if run_detection:
         stream_state["force_detection"] = False
         detections = detect_boats(
-            frame,
-            model,
-            sensor_info,
-            horizon_state,
-            mode,
-            channel=channel,
+            frame, model, sensor_info, horizon_state, mode, channel=channel
         )
 
     # Detection sonuçları, optical flow ve önceki track bilgileriyle birleştirilir.
