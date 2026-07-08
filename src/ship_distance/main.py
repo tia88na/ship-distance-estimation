@@ -1,5 +1,3 @@
-# ruff: noqa: ANN001, ANN201
-# ruff: noqa: ANN001, ANN201
 import bisect
 from collections import deque
 import csv
@@ -10,7 +8,7 @@ from statistics import median
 import cv2
 import numpy as np
 
-from ship_distance.config import AppConfig
+from config import AppConfig
 
 
 try:
@@ -28,8 +26,8 @@ except ImportError:
     YOLO_AVAILABLE = False
 
 
-#
-from ship_distance.sensor_reader import load_sensor_csv
+
+from sensor_reader import load_sensor_csv
 from ship_distance.video_processor import (
     create_stream_state,
     process_stream_frame,
@@ -300,7 +298,16 @@ def detect_horizon_visual(gray, center_y):
     }
 
 
-def main():
+def main() -> None:
+    """RGB ve termal gemi mesafe tahmin hattını çalıştırın.
+
+Bu fonksiyon proje yapılandırmasını yükler, RGB ve termal
+
+video akışlarını açar, sensör verilerini okur, algılama modelini başlatır ve
+
+kare işleme döngüsünü başlatır.
+
+"""
     if not YOLO_AVAILABLE:
         print("Ultralytics kurulu degil.")
         print("Kurulum: pip install ultralytics")
