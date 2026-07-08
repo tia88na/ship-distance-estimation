@@ -1,16 +1,16 @@
-import bisect
-from collections import deque
-import csv
 import math
 from pathlib import Path
-from statistics import median
 
 import cv2
 import numpy as np
 
 from config import AppConfig
+from sensor_reader import load_sensor_csv
+from video_processor import create_stream_state, process_stream_frame
+from visualizer import draw_stream_output, make_side_by_side
 
-
+# PyTorch kullanılabiliyorsa YOLO çıkarımı GPU üzerinde çalıştırılır.
+# CUDA yoksa kod otomatik olarak CPU moduna düşer.
 try:
     import torch
 
@@ -18,6 +18,8 @@ try:
 except Exception:
     CUDA_AVAILABLE = False
 
+# Ultralytics YOLO modeli opsiyonel bağımlılık olarak kontrol edilir.
+# Paket kurulu değilse program kullanıcıya kurulum bilgisini vererek durur.
 try:
     from ultralytics import YOLO
 
@@ -26,19 +28,9 @@ except ImportError:
     YOLO_AVAILABLE = False
 
 
-
-from sensor_reader import load_sensor_csv
-from ship_distance.video_processor import (
-    create_stream_state,
-    process_stream_frame,
-)
-from ship_distance.visualizer import (
-    draw_stream_output,
-    ensure_bgr_frame,
-    make_side_by_side,
-)
-
-
+# Proje ayarları Python kodunun içine sabit yazılmak yerine config.yaml
+# dosyasından okunur. Böylece kayıt yolu, kamera yüksekliği ve model yolu
+# kullanıcıya göre dışarıdan değiştirilebilir.
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
 CONFIG = AppConfig.from_yaml(CONFIG_PATH)
 
@@ -53,30 +45,43 @@ CSV_PATH = CONFIG.paths.sensor_csv
 OUTPUT_DIR = CONFIG.paths.output_dir
 OUTPUT_VIDEO_NAME = f"{RECORD_NAME}_rgb_thermal_clean_independent_distance.mp4"
 
+# Çalışma zamanı seçenekleri. Bu değerler video çıktısı alma, pencere gösterme
+# ve debug amaçlı çizimlerin açılıp kapatılmasını kontrol eder.
 SAVE_OUTPUT_VIDEO = True
 SHOW_WINDOW = True
 SHOW_TRACK_DETAILS = False
 DRAW_HORIZON_LINE = False
+
+# Ufuk çizgisi, kamera tilt bilgisine göre tahmin edilir. Bu katsayılar
+# ufuk çizgisinin ani sıçramasını engellemek için yumuşatma hızını belirler.
 MANUAL_HORIZON_BIAS_DEG = 0.0
 HORIZON_TILT_ONLY_EMA_STABLE = 0.12
 HORIZON_TILT_ONLY_EMA_MOVING = 0.28
 HORIZON_TILT_ONLY_MAX_STEP_STABLE_PX = 1.2
 HORIZON_TILT_ONLY_MAX_STEP_MOVING_PX = 9.0
 
+# İşleme çözünürlüğü sabit tutulur. RGB ve termal görüntüler bu boyuta göre
+# işlenir, çizilir ve çıktı videosuna yazılır.
 PROCESS_WIDTH = 1280
 PROCESS_HEIGHT = 720
 
 CX = PROCESS_WIDTH / 2.0
 CY = PROCESS_HEIGHT / 2.0
 
+# Kamera yüksekliği mesafe hesabında doğrudan kullanılır. Bu değer config.yaml
+# içinden okunur çünkü sahadan sahaya değişebilir.
 CAMERA_HEIGHT_M = CONFIG.camera.height_m
 
+# RGB ve termal kamera için varsayılan görüş açısı değerleri. CSV içinde FOV
+# bilgisi yoksa veya geçersizse bu değerler kullanılır.
 DEFAULT_FOV_H_DEG = 65.7
 DEFAULT_FOV_V_DEG = 39.9
 DEFAULT_THERMAL_FOV_H_DEG = 32.4
 DEFAULT_THERMAL_FOV_V_DEG = 24.6
 TILT_ZERO_HORIZON_DEG = 90.0
 
+# Dünya eğriliği ve atmosferik kırılma etkisi, uzak deniz mesafesi hesabında
+# ufuk çizgisini daha gerçekçi modellemek için kullanılır.
 EARTH_RADIUS_M = 6371000.0
 REFRACTION_K = 0.13
 EFFECTIVE_EARTH_RADIUS_M = EARTH_RADIUS_M / (1.0 - REFRACTION_K)
@@ -86,9 +91,12 @@ MAX_SEA_DISTANCE_M = math.sqrt(
     2.0 * EFFECTIVE_EARTH_RADIUS_M * CAMERA_HEIGHT_M
 )
 
+# Ufuk çizgisine çok yakın noktalar için mesafe hesabı güvenilir değildir.
+# Bu eşikler geçersiz veya fiziksel olarak anlamsız mesafeleri filtreler.
 MIN_BETA_RAD = math.radians(0.015)
 MIN_VALID_DISTANCE_M = 5.0
 
+# YOLO modeli ve tespit eşikleri. Model yolu config.yaml içinden alınır.
 YOLO_MODEL_PATH = CONFIG.model.yolo_path
 YOLO_CONF_FULL = 0.35
 YOLO_CONF_DEEP = 0.28
@@ -96,6 +104,8 @@ YOLO_IOU_THRES = 0.50
 YOLO_IMGSZ_FULL = 960
 YOLO_IMGSZ_DEEP = 1280
 
+# Termal görüntülerde kontrast ve detay farklı olduğu için RGB'den ayrı
+# confidence ve görüntü boyutu değerleri kullanılır.
 THERMAL_YOLO_CONF_FULL = 0.30
 THERMAL_YOLO_CONF_DEEP = 0.22
 THERMAL_YOLO_IMGSZ_FULL = 1280
@@ -110,14 +120,20 @@ THERMAL_BLOB_DARK_PERCENTILE = 2.0
 THERMAL_BLOB_MIN_CONTRAST = 18.0
 THERMAL_DETECT_WHILE_MOVING = False
 
+# CUDA varsa YOLO GPU'da ve half precision ile çalıştırılır. CUDA yoksa CPU
+# kullanılır. Böylece aynı kod farklı makinelerde çalışabilir.
 YOLO_DEVICE = 0 if CUDA_AVAILABLE else "cpu"
 YOLO_HALF = True if CUDA_AVAILABLE else False
 
+# Tespit aralıkları tracking durumuna göre değişir. Nesne takip ediliyorsa
+# her karede YOLO çalıştırmak yerine belirli aralıklarla tespit yapılır.
 DETECT_INTERVAL_TRACKING = 6
 DETECT_INTERVAL_LOST_FULL = 3
 DETECT_INTERVAL_LOST_DEEP = 9
 DETECT_INTERVAL_BOTTOM_DEEP = 6
 
+# Track eşleştirme ve track yaşam süresi ayarları. Bu değerler yanlış track
+# üretimini ve eski tracklerin ekranda gereğinden fazla kalmasını engeller.
 TRACK_MATCH_SCORE_THRES = 0.15
 TRACK_MIN_AGE_TO_DISPLAY = 3
 TRACK_MIN_CONFIRMED_UPDATES = 2
@@ -125,13 +141,19 @@ TRACK_MAX_MISSED_DETECTIONS = 6
 TRACK_MAX_STALE_FRAMES = 60
 TRACK_DRAW_MAX_STALE_FRAMES = 25
 
+# Bounding box ve confidence değerleri ani değişmesin diye yumuşatma
+# katsayıları kullanılır.
 BOX_ALPHA = 0.30
 CONF_ALPHA = 0.20
 
+# Mesafe hesabında kutu merkezi yerine su hattına yakın alt nokta kullanılır.
+# Çünkü geminin denizle temas ettiği nokta mesafe tahmini için daha anlamlıdır.
 WATERLINE_RATIO_NORMAL = 0.90
 WATERLINE_RATIO_ZOOM = 0.86
 WATER_HISTORY_LEN = 7
 
+# KLT optical flow ayarları. Bu ayarlar YOLO tespiti yapılmayan karelerde
+# nesne hareketini takip etmek için kullanılır.
 KLT_MAX_CORNERS = 120
 KLT_QUALITY_LEVEL = 0.01
 KLT_MIN_DISTANCE = 7
@@ -143,6 +165,8 @@ KLT_TOP_RATIO = 0.08
 KLT_BOTTOM_RATIO = 0.78
 KLT_SIDE_MARGIN_RATIO = 0.08
 
+# Ham mesafe ölçümleri kareden kareye zıplayabilir. Bu değerler mesafe
+# geçmişini tutar, ani sıçramaları sınırlar ve daha stabil çıktı üretir.
 RANGE_INIT_SAMPLE_COUNT = 4
 RANGE_HISTORY_WINDOW = 25
 RANGE_UPDATE_ALPHA_DETECTED = 0.20
@@ -153,12 +177,16 @@ RANGE_RELATIVE_RATE_PER_SEC = 0.10
 RANGE_MIN_RATE_M_PER_SEC = 2.0
 RECENT_RAW_WINDOW = 15
 
+# Kameranın kendi platformu veya çok yakın büyük nesneler tespit sonucu gibi
+# algılanmasın diye filtreleme eşikleri kullanılır.
 OWN_SHIP_BOTTOM_RATIO = 0.90
 OWN_SHIP_MIN_HEIGHT_RATIO = 0.30
 OWN_SHIP_MAX_AREA_RATIO = 0.40
 OWN_SHIP_NEAR_DISTANCE_M = 12.0
 OWN_SHIP_NEAR_BOTTOM_RATIO = 0.82
 
+# Global kamera hareketi, görüntüdeki genel optik akıştan tahmin edilir.
+# Bu bilgi pan/tilt/zoom hareketlerinde tracklerin dengeli kalmasına yardım eder.
 GLOBAL_MAX_CORNERS = 140
 GLOBAL_MIN_POINTS = 12
 GLOBAL_MAX_FLOW_PX = 150.0
@@ -166,6 +194,8 @@ PAN_ACTIVE_FLOW_PX = 18.0
 ZOOM_SCALE_EPS = 0.0015
 ZOOM_ACTIVE_SCALE = 0.006
 
+# Ufuk tespitinde kullanılan görüntü işleme eşikleri. Ufuk çizgisi zayıf,
+# eğimli veya gürültülü görünüyorsa bu değerler güvenilirliği kontrol eder.
 HORIZON_BAND_RATIO = 0.14
 HORIZON_COLUMN_STEP = 24
 HORIZON_MIN_POINTS = 18
@@ -186,6 +216,8 @@ HORIZON_MAX_STEP_STABLE_PX = 0.65
 HORIZON_MAX_STEP_MOVING_PX = 3.0
 HORIZON_FLOW_ALPHA = 0.18
 
+# Aynı gemiye ait birden fazla YOLO kutusu oluşursa bunları birleştirmek için
+# IoU, iç içelik, yatay örtüşme ve merkez uzaklığı eşikleri kullanılır.
 MERGE_IOU_THRES = 0.22
 MERGE_INSIDE_THRES = 0.55
 MERGE_HORIZONTAL_OVERLAP_THRES = 0.35
@@ -195,7 +227,24 @@ MERGE_CENTER_DISTANCE_RATIO = 0.82
 PANEL_HEIGHT = 158
 
 
-def detect_horizon_visual(gray, center_y):
+def detect_horizon_visual(
+    gray: np.ndarray,
+    center_y: float,
+) -> dict[str, float] | None:
+    """Gri görüntü üzerinde görsel ufuk çizgisini tespit eder.
+
+    Fonksiyon, beklenen ufuk konumunun çevresinde güçlü yatay kenarları arar.
+    Bulunan kenar noktaları sütunlar boyunca örneklenir ve ufuk çizgisi için
+    basit bir doğru uydurma işlemi uygulanır.
+
+    Args:
+        gray: Ufuk tespiti için kullanılan gri seviye görüntü.
+        center_y: Ufuk çizgisinin beklenen dikey piksel konumu.
+
+    Returns:
+        Ufuk çizgisinin y konumu, eğimi ve güven skorunu içeren sözlük.
+        Güvenilir ufuk bulunamazsa None döner.
+    """
     half = int(PROCESS_HEIGHT * HORIZON_BAND_RATIO)
     y1 = int(max(4, center_y - half))
     y2 = int(min(PROCESS_HEIGHT - 4, center_y + half))
@@ -203,9 +252,14 @@ def detect_horizon_visual(gray, center_y):
     if y2 - y1 < 24:
         return None
 
+    # Ufuk araması sadece beklenen dar bant içinde yapılır. Böylece deniz
+    # yüzeyi, gemiler veya görüntünün alt kısmındaki güçlü kenarlar ufuk
+    # tespitini gereksiz yere etkilemez.
     band = cv2.GaussianBlur(gray[y1:y2], (5, 5), 0)
     grad = np.abs(cv2.Sobel(band, cv2.CV_32F, 0, 1, ksize=3))
 
+    # Her satırdaki ortalama dikey gradyan alınarak en güçlü yatay kenar
+    # adayının bulunduğu satır tespit edilir.
     profile = grad.mean(axis=1)
     kernel = np.ones(5, dtype=np.float64) / 5.0
     profile = np.convolve(profile, kernel, mode="same")
@@ -224,6 +278,8 @@ def detect_horizon_visual(gray, center_y):
 
     sub_offset = 0.0
 
+    # En güçlü satırın komşularına bakılarak alt-piksel seviyesinde daha hassas
+    # bir ufuk konumu elde edilir.
     if 0 < peak_idx < len(profile) - 1:
         left = float(profile[peak_idx - 1])
         right = float(profile[peak_idx + 1])
@@ -235,15 +291,19 @@ def detect_horizon_visual(gray, center_y):
 
     row0 = y1 + peak_idx + sub_offset
 
+    # Güven skoru, en güçlü kenarın çevredeki ortalama kenar gücünden ne kadar
+    # ayrıştığına göre hesaplanır.
     conf = max(0.0, min(1.0, (ratio - 1.2) / 1.5))
 
     lo = max(0, peak_idx - HORIZON_REFINE_WINDOW)
     hi = min(len(profile), peak_idx + HORIZON_REFINE_WINDOW + 1)
 
-    xs = []
-    ys = []
-    ws = []
+    xs: list[float] = []
+    ys: list[float] = []
+    ws: list[float] = []
 
+    # Ufuk çizgisi tek bir satırdan değil, farklı sütunlardan alınan güçlü
+    # kenar noktalarından tahmin edilir. Bu sayede eğimli ufuklar da yakalanır.
     for x_value in range(8, PROCESS_WIDTH - 8, HORIZON_COLUMN_STEP):
         column = grad[lo:hi, x_value - 2 : x_value + 3].mean(axis=1)
         j_value = int(np.argmax(column))
@@ -268,6 +328,8 @@ def detect_horizon_visual(gray, center_y):
     intercept = float(row0)
     fit_ok = True
 
+    # Aykırı noktalar birkaç kez elenir. Böylece gemi, dalga veya yansıma gibi
+    # güçlü ama ufuk olmayan kenarlar doğru uydurma sonucunu bozmaz.
     for _ in range(3):
         if len(px) < HORIZON_MIN_POINTS:
             fit_ok = False
@@ -299,15 +361,12 @@ def detect_horizon_visual(gray, center_y):
 
 
 def main() -> None:
-    """RGB ve termal gemi mesafe tahmin hattını çalıştırın.
+    """RGB ve termal gemi mesafe tahmin hattını çalıştırır.
 
-Bu fonksiyon proje yapılandırmasını yükler, RGB ve termal
-
-video akışlarını açar, sensör verilerini okur, algılama modelini başlatır ve
-
-kare işleme döngüsünü başlatır.
-
-"""
+    Bu fonksiyon proje ayarlarını yükler, RGB ve termal video akışlarını açar,
+    sensör verilerini okur, YOLO modelini başlatır ve kare işleme döngüsünü
+    çalıştırır.
+    """
     if not YOLO_AVAILABLE:
         print("Ultralytics kurulu degil.")
         print("Kurulum: pip install ultralytics")
@@ -324,6 +383,8 @@ kare işleme döngüsünü başlatır.
         print(f"Thermal video bulunamadi: {THERMAL_VIDEO_PATH}")
         return
 
+    # RGB ve termal kanal için aynı CSV dosyasından sensör verileri okunur.
+    # Kanal parametresi, ilgili FOV/tilt/zoom kolonlarını seçmek için kullanılır.
     rgb_sensor_rows = load_sensor_csv(CSV_PATH, channel="rgb")
     thermal_sensor_rows = load_sensor_csv(CSV_PATH, channel="thermal")
 
@@ -352,6 +413,8 @@ kare işleme döngüsünü başlatır.
     rgb_fps = rgb_cap.get(cv2.CAP_PROP_FPS)
     thermal_fps = thermal_cap.get(cv2.CAP_PROP_FPS)
 
+    # Bazı video dosyalarında FPS bilgisi eksik veya hatalı gelebilir.
+    # Bu durumda güvenli varsayılan değer kullanılır.
     if rgb_fps is None or rgb_fps <= 1:
         rgb_fps = 25.0
 
@@ -367,6 +430,7 @@ kare işleme döngüsünü başlatır.
 
     writer = None
 
+    # İki kanal yan yana yazıldığı için çıktı video genişliği iki kat alınır.
     if SAVE_OUTPUT_VIDEO:
         writer = cv2.VideoWriter(
             str(output_video_path),
@@ -380,6 +444,8 @@ kare işleme döngüsünü başlatır.
     if SHOW_WINDOW:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
+    # RGB ve termal kanal ayrı state yapılarıyla takip edilir. Böylece her
+    # kanalın track, horizon ve sensör geçmişi birbirinden bağımsız kalır.
     rgb_state = create_stream_state("RGB", "rgb")
     thermal_state = create_stream_state("THERMAL", "thermal")
 
@@ -410,6 +476,8 @@ kare işleme döngüsünü başlatır.
         fps = cv2.getTickFrequency() / max(current_tick - previous_tick, 1)
         previous_tick = current_tick
 
+        # Her karede RGB ve termal görüntüler ayrı ayrı işlenir. Bu fonksiyon
+        # tespit, takip, ufuk güncelleme ve mesafe hesabı adımlarını yürütür.
         rgb_output, rgb_moving = process_stream_frame(
             rgb_frame,
             rgb_state,
@@ -427,6 +495,8 @@ kare işleme döngüsünü başlatır.
             video_fps,
         )
 
+        # İşlenen karelerin üzerine track kutuları, mesafe bilgileri ve kanal
+        # durum bilgileri çizilir.
         draw_stream_output(
             rgb_output,
             rgb_state,
@@ -446,6 +516,8 @@ kare işleme döngüsünü başlatır.
             thermal_moving,
         )
 
+        # RGB ve termal çıktı tek ekranda karşılaştırılabilsin diye yan yana
+        # birleştirilir.
         combined = make_side_by_side(rgb_output, thermal_output)
 
         if writer is not None:
