@@ -11,8 +11,6 @@ from statistics import median
 from typing import TypeAlias, cast
 
 import cv2
-import numpy as np
-
 from detector import (
     box_to_int,
     calculate_iou,
@@ -31,6 +29,7 @@ from geometry import (
     clamp_horizon_y,
     sea_distance_from_image_point,
 )
+import numpy as np
 from sensor_reader import SensorRow
 
 
@@ -180,10 +179,7 @@ def estimate_global_motion(
 
 
 def rescale_point(
-    x_value: float,
-    y_value: float,
-    scale_x: float,
-    scale_y: float,
+    x_value: float, y_value: float, scale_x: float, scale_y: float
 ) -> Point:
     """Bir noktayı görüntü merkezi etrafında FOV ölçeğine göre yeniden konumlar.
 
@@ -464,9 +460,7 @@ def apply_velocity_prediction(track: Track) -> None:
 
 
 def smooth_value(
-    old_value: float | None,
-    new_value: float,
-    alpha: float,
+    old_value: float | None, new_value: float, alpha: float
 ) -> float:
     """Tek bir sayısal değeri ağırlıklı ortalama ile yumuşatır.
 
@@ -529,10 +523,7 @@ def refresh_track_water_point(track: Track, sensor_info: SensorRow) -> None:
 
 
 def create_new_track(
-    track_id: int,
-    det: Detection,
-    current_gray: np.ndarray,
-    frame_index: int,
+    track_id: int, det: Detection, current_gray: np.ndarray, frame_index: int
 ) -> Track:
     """Yeni detection sonucundan yeni track sözlüğü oluşturur.
 
@@ -643,7 +634,9 @@ def update_tracks(
 
     for track in tracks.values():
         track["global_frame_index"] = frame_index
-        track["frames_since_update"] = int(track.get("frames_since_update", 0)) + 1
+        track["frames_since_update"] = (
+            int(track.get("frames_since_update", 0)) + 1
+        )
         track["klt_ok"] = False
 
         if not skip_optical:
@@ -658,7 +651,10 @@ def update_tracks(
 
             # KLT noktaları belirli aralıklarla yeniden başlatılır. Bu, zamanla
             # bozulan köşe noktalarını tazeler.
-            if int(track.get("frames_since_update", 0)) % KLT_REINIT_EVERY == 0:
+            if (
+                int(track.get("frames_since_update", 0)) % KLT_REINIT_EVERY
+                == 0
+            ):
                 track["klt_points"] = init_klt_points(
                     current_gray, cast(Box, track["box"])
                 )
@@ -905,9 +901,7 @@ def calculate_track_distance(
     range_history.append(locked_distance)
 
     if len(range_history) >= 5:
-        stable_distance = 0.85 * locked_distance + 0.15 * median(
-            range_history
-        )
+        stable_distance = 0.85 * locked_distance + 0.15 * median(range_history)
     else:
         stable_distance = locked_distance
 
@@ -930,7 +924,10 @@ def any_track_near_bottom(tracks: TrackMap) -> bool:
         Alt bölgeye yakın track varsa True.
     """
     for track in tracks.values():
-        if int(track.get("frames_since_update", 0)) > TRACK_DRAW_MAX_STALE_FRAMES:
+        if (
+            int(track.get("frames_since_update", 0))
+            > TRACK_DRAW_MAX_STALE_FRAMES
+        ):
             continue
 
         _, _, _, y2 = box_to_int(cast(Box, track["box"]))
