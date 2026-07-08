@@ -7,7 +7,7 @@ Mesafe tahmini doğrudan görüntüdeki nesne boyutuna göre yapılmaz. Bunun ye
 kamera yüksekliği, kamera görüş açısı, tilt bilgisi, ufuk çizgisi konumu ve
 nesnenin görüntüdeki su hattı noktası birlikte değerlendirilir.
 """
-import numpy as np
+
 from collections import deque
 import math
 from typing import Any
