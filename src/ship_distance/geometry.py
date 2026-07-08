@@ -12,6 +12,8 @@ from collections import deque
 import math
 from typing import Any
 
+import numpy as np
+
 
 PROCESS_WIDTH = 1280
 PROCESS_HEIGHT = 720
@@ -162,8 +164,7 @@ def pixel_row_to_angle(y_value: float, fy_value: float) -> float:
 
 
 def predict_horizon_y_from_tilt(
-    sensor_info: dict[str, Any],
-    pitch_bias_rad: float = 0.0,
+    sensor_info: dict[str, Any], pitch_bias_rad: float = 0.0
 ) -> float:
     """Tilt ve FOV bilgileriyle ufuk çizgisinin y konumunu tahmin eder.
 
@@ -226,9 +227,7 @@ def clamp_horizon_y(y_value: float) -> float:
 
 
 def limit_horizon_step(
-    current_y: float,
-    target_y: float,
-    max_step: float,
+    current_y: float, target_y: float, max_step: float
 ) -> float:
     """Ufuk çizgisinin tek karede yapabileceği maksimum değişimi sınırlar.
 
@@ -280,7 +279,9 @@ def update_horizon(
     _ = gray, frame_index
 
     target_y = clamp_horizon_y(
-        predict_horizon_y_from_tilt(sensor_info, horizon_state["pitch_bias_rad"])
+        predict_horizon_y_from_tilt(
+            sensor_info, horizon_state["pitch_bias_rad"]
+        )
     )
 
     # İlk frame'de geçmiş değer olmadığı için ufuk doğrudan hedef değere atanır.
@@ -348,7 +349,9 @@ def sea_distance_from_image_point(
         Mesafe sonucunu, geçerlilik bilgisini, ileri/yanal bileşenleri ve
         hesaplama yardımcı değerlerini içeren sözlük.
     """
-    fx_value, fy_value = focal_from_fov(sensor_info["fov_h"], sensor_info["fov_v"])
+    fx_value, fy_value = focal_from_fov(
+        sensor_info["fov_h"], sensor_info["fov_v"]
+    )
 
     y_horizon = horizon_y_at(horizon_state, pixel_x)
 
