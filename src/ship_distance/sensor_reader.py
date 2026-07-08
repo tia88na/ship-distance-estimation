@@ -55,8 +55,7 @@ def parse_float(value: object) -> float | None:
 
 
 def find_column(
-    fieldnames: list[str] | None,
-    possible_names: list[str],
+    fieldnames: list[str] | None, possible_names: list[str]
 ) -> str | None:
     """CSV kolonları içinde olası kolon adlarından birini bulur.
 
@@ -96,8 +95,7 @@ def find_column(
 
 
 def parse_time_to_seconds(
-    value: object,
-    first_absolute_time: float | None = None,
+    value: object, first_absolute_time: float | None = None
 ) -> tuple[float | None, float | None]:
     """CSV zaman değerini video başlangıcına göre saniyeye çevirir.
 
@@ -252,7 +250,9 @@ def channel_default_fov(channel: str) -> tuple[float, float]:
     return DEFAULT_FOV_H_DEG, DEFAULT_FOV_V_DEG
 
 
-def load_sensor_csv(csv_path: str | Path, channel: str = "rgb") -> list[SensorRow]:
+def load_sensor_csv(
+    csv_path: str | Path, channel: str = "rgb"
+) -> list[SensorRow]:
     """Sensör CSV dosyasını okur ve normalize edilmiş satır listesi üretir.
 
     Fonksiyon CSV delimiter tipini otomatik algılamaya çalışır. Ardından zaman,
@@ -421,9 +421,7 @@ def load_sensor_csv(csv_path: str | Path, channel: str = "rgb") -> list[SensorRo
 
 
 def interpolate_value(
-    a_value: float | None,
-    b_value: float | None,
-    ratio: float,
+    a_value: float | None, b_value: float | None, ratio: float
 ) -> float | None:
     """İki sayısal sensör değeri arasında lineer interpolation yapar.
 
@@ -448,8 +446,7 @@ def interpolate_value(
 
 
 def get_sensor_for_time(
-    sensor_rows: list[SensorRow],
-    video_second: float,
+    sensor_rows: list[SensorRow], video_second: float
 ) -> SensorRow:
     """Video zamanına karşılık gelen sensör bilgisini döndürür.
 
@@ -538,8 +535,7 @@ def get_sensor_for_time(
 
 
 def smooth_sensor(
-    previous_sensor: SensorRow | None,
-    new_sensor: SensorRow,
+    previous_sensor: SensorRow | None, new_sensor: SensorRow
 ) -> SensorRow:
     """Sensör değerlerini frame'ler arasında yumuşatır.
 

@@ -9,9 +9,8 @@ ait detection kutularını birleştirme adımları burada yönetilir.
 from typing import TypeAlias, cast
 
 import cv2
-import numpy as np
-
 from geometry import horizon_y_at, sea_distance_from_image_point
+import numpy as np
 from sensor_reader import SensorRow
 
 
@@ -277,7 +276,9 @@ def get_waterline_ratio(sensor_info: SensorRow) -> float:
     return WATERLINE_RATIO_NORMAL
 
 
-def get_water_point_from_box(box: Box, sensor_info: SensorRow) -> tuple[float, float]:
+def get_water_point_from_box(
+    box: Box, sensor_info: SensorRow
+) -> tuple[float, float]:
     """Bounding box içinden mesafe hesabında kullanılacak su hattı noktasını alır.
 
     Args:
@@ -340,9 +341,7 @@ def is_own_ship_box(box: Box) -> bool:
 
 
 def filter_detection(
-    det: Detection,
-    sensor_info: SensorRow,
-    horizon_state: HorizonState,
+    det: Detection, sensor_info: SensorRow, horizon_state: HorizonState
 ) -> bool:
     """Ham detection sonucunu geometri ve boyut kurallarına göre filtreler.
 
@@ -445,9 +444,7 @@ def filter_detection(
 
 
 def build_search_regions(
-    sensor_info: SensorRow,
-    horizon_state: HorizonState,
-    mode: str,
+    sensor_info: SensorRow, horizon_state: HorizonState, mode: str
 ) -> list[Region]:
     """YOLO'nun çalışacağı görüntü bölgelerini üretir.
 
@@ -871,8 +868,7 @@ def same_vessel(det_a: Detection, det_b: Detection) -> bool:
 
 
 def merge_detection_group(
-    group: list[Detection],
-    sensor_info: SensorRow,
+    group: list[Detection], sensor_info: SensorRow
 ) -> Detection:
     """Aynı hedefe ait detection grubunu tek detection'a indirger.
 
@@ -901,8 +897,7 @@ def merge_detection_group(
 
 
 def merge_same_vessel_detections(
-    detections: list[Detection],
-    sensor_info: SensorRow,
+    detections: list[Detection], sensor_info: SensorRow
 ) -> list[Detection]:
     """Aynı gemiye ait tekrar detection kutularını birleştirir.
 
