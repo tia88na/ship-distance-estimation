@@ -1,4 +1,4 @@
-from ship_distance.geometry import clamp_horizon_y
+from geometry import clamp_horizon_y
 
 
 """Tracking, KLT motion, and range smoothing helpers."""
@@ -7,9 +7,7 @@ from collections import deque
 from statistics import median
 
 import cv2
-import numpy as np
-
-from ship_distance.detector import (
+from detector import (
     box_to_int,
     calculate_iou,
     center_x_distance_ratio,
@@ -18,7 +16,7 @@ from ship_distance.detector import (
     horizontal_overlap_ratio,
     visible_box,
 )
-from ship_distance.geometry import (
+from geometry import (
     CY,
     MAX_SEA_DISTANCE_M,
     MIN_VALID_DISTANCE_M,
@@ -26,6 +24,7 @@ from ship_distance.geometry import (
     PROCESS_WIDTH,
     sea_distance_from_image_point,
 )
+import numpy as np
 
 
 CX = PROCESS_WIDTH / 2.0

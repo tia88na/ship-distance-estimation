@@ -1,10 +1,10 @@
 import math
 from pathlib import Path
 
-from ship_distance.config import AppConfig
-from ship_distance.detector import THERMAL_YOLO_CONF_DEEP
-from ship_distance.geometry import focal_from_fov
-from ship_distance.sensor_reader import get_sensor_for_time
+from config import AppConfig
+from detector import THERMAL_YOLO_CONF_DEEP
+from geometry import focal_from_fov
+from sensor_reader import get_sensor_for_time
 
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
@@ -29,16 +29,15 @@ DEFAULT_THERMAL_FOV_V_DEG = CONFIG.camera.thermal_fov_v_deg
 
 
 import cv2
-import numpy as np
-
-from ship_distance.detector import box_to_int, visible_box
-from ship_distance.geometry import (
+from detector import box_to_int, visible_box
+from geometry import (
     PROCESS_HEIGHT,
     PROCESS_WIDTH,
     format_distance,
     horizon_y_at,
 )
-from ship_distance.tracker import calculate_track_distance
+import numpy as np
+from tracker import calculate_track_distance
 
 
 SHOW_TRACK_DETAILS = False

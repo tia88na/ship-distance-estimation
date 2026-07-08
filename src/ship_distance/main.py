@@ -1,13 +1,13 @@
 import math
 from pathlib import Path
 
+from config import AppConfig
 import cv2
 import numpy as np
-
-from config import AppConfig
 from sensor_reader import load_sensor_csv
 from video_processor import create_stream_state, process_stream_frame
 from visualizer import draw_stream_output, make_side_by_side
+
 
 # PyTorch kullanılabiliyorsa YOLO çıkarımı GPU üzerinde çalıştırılır.
 # CUDA yoksa kod otomatik olarak CPU moduna düşer.
@@ -228,8 +228,7 @@ PANEL_HEIGHT = 158
 
 
 def detect_horizon_visual(
-    gray: np.ndarray,
-    center_y: float,
+    gray: np.ndarray, center_y: float
 ) -> dict[str, float] | None:
     """Gri görüntü üzerinde görsel ufuk çizgisini tespit eder.
 

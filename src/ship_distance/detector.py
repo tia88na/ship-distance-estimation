@@ -1,9 +1,8 @@
 """Boat detection, thermal preprocessing, and detection merge helpers."""
 
 import cv2
+from geometry import horizon_y_at, sea_distance_from_image_point
 import numpy as np
-
-from ship_distance.geometry import horizon_y_at, sea_distance_from_image_point
 
 
 PROCESS_WIDTH = 1280
