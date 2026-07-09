@@ -559,15 +559,11 @@ def estimate_distance_from_bbox_size(
     # Yan görünümde görünen genişlik geminin gerçek uzunluğuna daha yakındır.
     # Önden/diyagonal görünümde ise gemi uzunluğu görüntüye yansımaz; bu yüzden
     # width-based ağırlık düşürülür.
-    width_confidence = clamp(
-        0.10 + 0.75 * scores["side_score"], 0.10, 0.85
-    )
+    width_confidence = clamp(0.10 + 0.75 * scores["side_score"], 0.10, 0.85)
 
     # Height-based hesap tek başına kesin değildir ama önden/diyagonal görünümde
     # width-based hesaba göre daha stabil olabilir.
-    height_confidence = clamp(
-        0.25 + 0.35 * scores["bow_score"], 0.20, 0.60
-    )
+    height_confidence = clamp(0.25 + 0.35 * scores["bow_score"], 0.20, 0.60)
 
     width_distance = SHIP_VISIBLE_LENGTH_M * fx_value / width_px
     width_min = SHIP_VISIBLE_LENGTH_MIN_M * fx_value / width_px
@@ -588,8 +584,7 @@ def estimate_distance_from_bbox_size(
         }
 
     size_distance = (
-        width_distance * width_confidence
-        + height_distance * height_confidence
+        width_distance * width_confidence + height_distance * height_confidence
     ) / total_weight
 
     min_distance = min(width_min, height_min)
@@ -602,7 +597,11 @@ def estimate_distance_from_bbox_size(
         0.95,
     )
 
-    if not SIZE_DISTANCE_MIN_VALID_M <= size_distance <= SIZE_DISTANCE_MAX_VALID_M:
+    if (
+        not SIZE_DISTANCE_MIN_VALID_M
+        <= size_distance
+        <= SIZE_DISTANCE_MAX_VALID_M
+    ):
         return {
             "valid": False,
             "reason": "bbox_size_distance_out_of_range",
@@ -758,10 +757,9 @@ def fuse_horizon_and_size_distance(
     horizon_distance_float = float(horizon_distance)
     size_distance_float = float(size_distance)
 
-    ratio = max(
-        horizon_distance_float,
-        size_distance_float,
-    ) / max(min(horizon_distance_float, size_distance_float), 1.0)
+    ratio = max(horizon_distance_float, size_distance_float) / max(
+        min(horizon_distance_float, size_distance_float), 1.0
+    )
 
     if ratio > DISAGREEMENT_RATIO_THRES:
         # Bbox-size sonucu makul güvene sahipse ve horizon ile ciddi çelişiyorsa
@@ -788,9 +786,7 @@ def fuse_horizon_and_size_distance(
     )
 
     confidence = clamp(
-        0.5 * size_confidence + 0.5 * horizon_confidence,
-        0.05,
-        0.95,
+        0.5 * size_confidence + 0.5 * horizon_confidence, 0.05, 0.95
     )
 
     return {
@@ -837,9 +833,7 @@ def water_point_from_box_for_geometry(
 
 
 def estimate_hybrid_distance_from_box(
-    box: Box,
-    sensor_info: dict[str, Any],
-    horizon_state: dict[str, Any],
+    box: Box, sensor_info: dict[str, Any], horizon_state: dict[str, Any]
 ) -> dict[str, Any]:
     """BBox, FOV/zoom ve horizon bilgisinden hibrit mesafe hesaplar.
 
@@ -854,18 +848,13 @@ def estimate_hybrid_distance_from_box(
     water_x, water_y = water_point_from_box_for_geometry(box, sensor_info)
 
     horizon_result = sea_distance_from_image_point(
-        water_x,
-        water_y,
-        sensor_info,
-        horizon_state,
+        water_x, water_y, sensor_info, horizon_state
     )
 
     size_result = estimate_distance_from_bbox_size(box, sensor_info)
 
     return fuse_horizon_and_size_distance(
-        horizon_result,
-        size_result,
-        sensor_info,
+        horizon_result, size_result, sensor_info
     )
 
 
