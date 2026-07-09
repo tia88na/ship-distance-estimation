@@ -4,6 +4,11 @@ Bu dosya RGB ve termal görüntülerde tekne/gemi tespiti için kullanılan ana
 yardımcı fonksiyonları içerir. YOLO bölgesel inference işlemi, termal aday
 maskeleme, bounding box filtreleme, su hattı noktası hesaplama ve aynı hedefe
 ait detection kutularını birleştirme adımları burada yönetilir.
+
+Bu sürümde ana hedef detection kalitesini iyileştirmektir. Mesafe hesabı
+değiştirilmeden önce yanlış bbox kaynaklı hatalar azaltılır. Özellikle dar
+zoom kayıtlarında alt kısımdaki bina/çatı/sahil parçalarının gemi olarak
+algılanması engellenmeye çalışılır.
 """
 
 from typing import TypeAlias, cast
@@ -30,15 +35,21 @@ YOLO_IOU_THRES = 0.50
 YOLO_DEVICE = 0
 YOLO_HALF = False
 
-YOLO_CONF_FULL = 0.35
-YOLO_CONF_DEEP = 0.28
-YOLO_IMGSZ_FULL = 960
-YOLO_IMGSZ_DEEP = 1280
+# Full frame detection daha yüksek confidence ile çalışır. Full frame içinde
+# bina/çatı gibi false positive riski daha yüksektir.
+YOLO_CONF_FULL = 0.42
 
-THERMAL_YOLO_CONF_FULL = 0.30
-THERMAL_YOLO_CONF_DEEP = 0.22
+# Ufuk bandı ve tile bölgeleri küçük/uzak hedefler için kullanıldığı için daha
+# düşük confidence ile ikinci seviyede taranır.
+YOLO_CONF_DEEP = 0.20
+
+YOLO_IMGSZ_FULL = 960
+YOLO_IMGSZ_DEEP = 1536
+
+THERMAL_YOLO_CONF_FULL = 0.34
+THERMAL_YOLO_CONF_DEEP = 0.20
 THERMAL_YOLO_IMGSZ_FULL = 1280
-THERMAL_YOLO_IMGSZ_DEEP = 1280
+THERMAL_YOLO_IMGSZ_DEEP = 1536
 
 THERMAL_BLOB_DETECTION_ENABLED = False
 THERMAL_BLOB_MIN_AREA = 350
@@ -63,6 +74,41 @@ MERGE_INSIDE_THRES = 0.55
 MERGE_HORIZONTAL_OVERLAP_THRES = 0.35
 MERGE_VERTICAL_GAP_PX = 180
 MERGE_CENTER_DISTANCE_RATIO = 0.82
+
+STRONG_ZOOM_FOV_H_DEG = 5.0
+ZOOM_FOV_H_DEG = 15.0
+MID_FOV_H_DEG = 30.0
+
+# Dar FOV test videolarında hedefler genellikle ufuk çizgisine yakın deniz
+# bandında olur. Çok aşağıdaki kutular çoğunlukla sahil, bina veya çatı
+# false positive üretir.
+STRONG_ZOOM_SEARCH_DEPTH_PX = 230
+ZOOM_SEARCH_DEPTH_PX = 300
+MID_FOV_SEARCH_DEPTH_PX = 390
+
+# Detection filtreleme için search depth'ten biraz daha toleranslı sınır.
+STRONG_ZOOM_VALID_DEPTH_PX = 260
+ZOOM_VALID_DEPTH_PX = 340
+MID_FOV_VALID_DEPTH_PX = 440
+
+BOTTOM_STRUCTURE_Y1_RATIO = 0.62
+BOTTOM_STRUCTURE_WATER_RATIO = 0.76
+BOTTOM_STRUCTURE_AREA_RATIO = 0.012
+
+
+def get_sensor_fov_h(sensor_info: SensorRow) -> float:
+    """Sensör bilgisinden yatay FOV değerini güvenli şekilde okur.
+
+    Args:
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+
+    Returns:
+        Yatay FOV değeri. Okunamazsa geniş açı varsayımı döner.
+    """
+    try:
+        return float(sensor_info.get("fov_h", 65.7))
+    except (TypeError, ValueError):
+        return 65.7
 
 
 def get_class_name(model: object, cls_id: int) -> str:
@@ -270,7 +316,7 @@ def get_waterline_ratio(sensor_info: SensorRow) -> float:
         Kutunun üstünden itibaren su hattı için kullanılacak oran.
     """
     # Dar FOV/zoom durumunda kutunun altına çok yaklaşmamak için oran azaltılır.
-    if float(sensor_info["fov_h"]) < 15.0:
+    if get_sensor_fov_h(sensor_info) < ZOOM_FOV_H_DEG:
         return WATERLINE_RATIO_ZOOM
 
     return WATERLINE_RATIO_NORMAL
@@ -340,6 +386,116 @@ def is_own_ship_box(box: Box) -> bool:
     return False
 
 
+def max_search_depth_below_horizon(sensor_info: SensorRow, mode: str) -> int:
+    """YOLO aramasının ufuk altında ne kadar derine ineceğini belirler.
+
+    Args:
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+        mode: Detection çalışma modu.
+
+    Returns:
+        Ufuk çizgisinin altında aranacak maksimum piksel derinliği.
+    """
+    # bottom_deep özellikle yakın/alt hedefler için kullanılıyorsa eski davranışa
+    # daha yakın tutulur.
+    if mode == "bottom_deep":
+        return PROCESS_HEIGHT
+
+    fov_h = get_sensor_fov_h(sensor_info)
+
+    if fov_h < STRONG_ZOOM_FOV_H_DEG:
+        return STRONG_ZOOM_SEARCH_DEPTH_PX
+
+    if fov_h < ZOOM_FOV_H_DEG:
+        return ZOOM_SEARCH_DEPTH_PX
+
+    if fov_h < MID_FOV_H_DEG:
+        return MID_FOV_SEARCH_DEPTH_PX
+
+    return PROCESS_HEIGHT
+
+
+def max_valid_depth_below_horizon(sensor_info: SensorRow) -> int:
+    """Detection su hattı için izin verilen maksimum ufuk altı derinliği.
+
+    Args:
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+
+    Returns:
+        Ufuk çizgisinin altında geçerli kabul edilen maksimum piksel derinliği.
+    """
+    fov_h = get_sensor_fov_h(sensor_info)
+
+    if fov_h < STRONG_ZOOM_FOV_H_DEG:
+        return STRONG_ZOOM_VALID_DEPTH_PX
+
+    if fov_h < ZOOM_FOV_H_DEG:
+        return ZOOM_VALID_DEPTH_PX
+
+    if fov_h < MID_FOV_H_DEG:
+        return MID_FOV_VALID_DEPTH_PX
+
+    return PROCESS_HEIGHT
+
+
+def is_probable_bottom_structure(
+    det: Detection, sensor_info: SensorRow, horizon_state: HorizonState
+) -> bool:
+    """RGB görüntüde bina/çatı/sahil parçası olabilecek kutuları ayıklar.
+
+    Args:
+        det: Kontrol edilecek detection.
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+        horizon_state: Güncel ufuk çizgisi durumu.
+
+    Returns:
+        Kutu alt bölge yapısı gibi görünüyorsa True.
+    """
+    if det.get("channel") == "thermal":
+        return False
+
+    box = cast(Box, det["box"])
+    x1, y1, x2, y2 = box
+
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    area_ratio = (width * height) / float(PROCESS_WIDTH * PROCESS_HEIGHT)
+    aspect = width / max(height, 1.0)
+
+    water_y = float(det["water_y"])
+    y_horizon = horizon_y_at(horizon_state, float(det["water_x"]))
+    depth_below_horizon = water_y - y_horizon
+
+    # Dar zoom görüntülerde gemiler çoğunlukla ufuk çevresindeki deniz bandında
+    # beklenir. Çok aşağıdaki kutular sahil/bina/çatı false positive olabilir.
+    if (
+        get_sensor_fov_h(sensor_info) < ZOOM_FOV_H_DEG
+        and y1 > PROCESS_HEIGHT * BOTTOM_STRUCTURE_Y1_RATIO
+        and water_y > PROCESS_HEIGHT * BOTTOM_STRUCTURE_WATER_RATIO
+    ):
+        return True
+
+    # Alt kısımda, belirgin alan kaplayan ve gemi gövdesi oranına uymayan
+    # kutular liman yapısı gibi davranır.
+    if (
+        y1 > PROCESS_HEIGHT * BOTTOM_STRUCTURE_Y1_RATIO
+        and area_ratio > BOTTOM_STRUCTURE_AREA_RATIO
+        and (aspect < 0.55 or aspect > 9.5)
+    ):
+        return True
+
+    # Ufuk çizgisinden çok aşağıda kalan kutular yakın obje/sahil yapısı olabilir.
+    if depth_below_horizon > max_valid_depth_below_horizon(sensor_info):
+        return True
+
+    # Görüntünün en altına yaklaşan büyük RGB kutular gerçek uzak gemiden çok
+    # sahil parçası veya kendi platform objesi olma eğilimindedir.
+    if y2 > PROCESS_HEIGHT * 0.92 and area_ratio > 0.018:
+        return True
+
+    return False
+
+
 def filter_detection(
     det: Detection, sensor_info: SensorRow, horizon_state: HorizonState
 ) -> bool:
@@ -361,6 +517,7 @@ def filter_detection(
     area = width * height
     frame_area = PROCESS_WIDTH * PROCESS_HEIGHT
     is_thermal = det.get("channel") == "thermal"
+    fov_h = get_sensor_fov_h(sensor_info)
 
     # Termal görüntüde küçük sıcak hedefler görülebileceği için minimum boyut
     # RGB'ye göre farklı tutulur.
@@ -377,15 +534,17 @@ def filter_detection(
     # FOV daraldıkça aynı hedef görüntüde daha büyük görünür. Bu yüzden alan
     # eşiği FOV'a göre değiştirilir.
     if is_thermal:
-        if float(sensor_info["fov_h"]) < 15.0:
+        if fov_h < ZOOM_FOV_H_DEG:
             min_area = 70
-        elif float(sensor_info["fov_h"]) < 30.0:
+        elif fov_h < MID_FOV_H_DEG:
             min_area = 110
         else:
             min_area = 180
-    elif float(sensor_info["fov_h"]) < 15.0:
+    elif fov_h < STRONG_ZOOM_FOV_H_DEG:
+        min_area = 26
+    elif fov_h < ZOOM_FOV_H_DEG:
         min_area = 40
-    elif float(sensor_info["fov_h"]) < 30.0:
+    elif fov_h < MID_FOV_H_DEG:
         min_area = 90
     else:
         min_area = 220
@@ -412,8 +571,13 @@ def filter_detection(
             and area < THERMAL_BLOB_MIN_AREA
         ):
             return False
-    elif aspect < 0.25 or aspect > 18.0:
-        return False
+    else:
+        if aspect < 0.35 or aspect > 16.0:
+            return False
+
+        # Dar zoomda çok dikey kutular genellikle bina/çatı parçası olur.
+        if fov_h < ZOOM_FOV_H_DEG and aspect < 0.55:
+            return False
 
     if is_own_ship_box(box):
         return False
@@ -423,6 +587,9 @@ def filter_detection(
     # Su hattı ufuk çizgisinin üstünde veya tam üstündeyse fiziksel mesafe
     # hesabı güvenilir değildir.
     if float(det["water_y"]) <= y_horizon + 0.5:
+        return False
+
+    if is_probable_bottom_structure(det, sensor_info, horizon_state):
         return False
 
     result = sea_distance_from_image_point(
@@ -457,27 +624,44 @@ def build_search_regions(
         Region adı ve koordinatlarından oluşan arama bölgesi listesi.
     """
     y_h = int(max(10, min(PROCESS_HEIGHT - 40, float(horizon_state["y"]))))
+    fov_h = get_sensor_fov_h(sensor_info)
 
-    # Full frame her zaman ilk arama bölgesi olarak eklenir.
+    # Full frame ilk arama bölgesi olarak korunur. Ancak filter_detection içinde
+    # full frame kaynaklı alt bölge false positive'leri daha sert elenir.
     regions: list[Region] = [("full", 0, 0, PROCESS_WIDTH, PROCESS_HEIGHT)]
 
     if mode == "full_only":
         return regions
 
-    # Ufuk çevresi küçük ve uzak hedefler için önemlidir.
+    search_depth = max_search_depth_below_horizon(sensor_info, mode)
+    y_bottom = min(PROCESS_HEIGHT, y_h + search_depth)
+
+    # Ufuk çevresi küçük ve uzak hedefler için en önemli bölgedir.
     regions.append(
         (
             "horizon_strip",
             0,
-            max(0, y_h - 46),
+            max(0, y_h - 70),
             PROCESS_WIDTH,
-            min(PROCESS_HEIGHT, y_h + 110),
+            min(PROCESS_HEIGHT, y_h + 170),
+        )
+    )
+
+    # Dar zoomda aramayı alt bina/çatı bölgesine kadar indirmiyoruz. Böylece
+    # sahil yapılarının YOLO tarafından boat sanılma ihtimali azalır.
+    regions.append(
+        (
+            "sea_band",
+            0,
+            max(0, y_h - 30),
+            PROCESS_WIDTH,
+            y_bottom,
         )
     )
 
     if mode == "bottom_deep":
-        # Alt bölgeler, yakın ve alt kısımda kalan hedefleri yakalamak için
-        # daha derin arama modunda eklenir.
+        # Alt bölgeler sadece özel modda eklenir. Bu mod yakın hedefleri
+        # yakalamak için var; normal zoomed testte ana kaynak olmamalıdır.
         regions.extend(
             [
                 (
@@ -497,31 +681,20 @@ def build_search_regions(
             ]
         )
 
-        tile_w = 640
-        step = 420
-        y0 = max(0, min(int(PROCESS_HEIGHT * 0.35), y_h - 20))
-
+    # Dar FOV'da daha küçük yatay tile kullanılır. Böylece uzak hedefler crop
+    # içinde daha büyük görünür ve küçük tekne yakalama şansı artar.
+    if fov_h < STRONG_ZOOM_FOV_H_DEG:
+        tile_w = 420
+        step = 260
+        tile_y0 = max(0, y_h - 55)
+    elif fov_h < ZOOM_FOV_H_DEG:
+        tile_w = 520
+        step = 340
+        tile_y0 = max(0, y_h - 45)
     else:
-        regions.append(
-            (
-                "below_horizon",
-                0,
-                max(0, y_h - 20),
-                PROCESS_WIDTH,
-                PROCESS_HEIGHT,
-            )
-        )
-
-        # Dar FOV'da daha küçük yatay tile kullanılır. Böylece uzak hedefler
-        # daha yüksek çözünürlükte modele verilir.
-        if float(sensor_info["fov_h"]) < 20.0:
-            tile_w = 520
-            step = 360
-        else:
-            tile_w = 640
-            step = 460
-
-        y0 = max(0, y_h - 20)
+        tile_w = 640
+        step = 460
+        tile_y0 = max(0, y_h - 30)
 
     x_value = 0
 
@@ -530,7 +703,7 @@ def build_search_regions(
         x2 = min(PROCESS_WIDTH, x_value + tile_w)
         x1 = max(0, x2 - tile_w)
 
-        regions.append((f"tile_{x1}", x1, y0, x2, PROCESS_HEIGHT))
+        regions.append((f"tile_{x1}", x1, tile_y0, x2, y_bottom))
 
         if x2 >= PROCESS_WIDTH:
             break
@@ -726,6 +899,31 @@ def detect_thermal_blobs(
     return detections
 
 
+def region_confidence(
+    region_name: str, base_full_conf: float, base_deep_conf: float
+) -> float:
+    """Region adına göre YOLO confidence eşiğini seçer.
+
+    Args:
+        region_name: Detection region adı.
+        base_full_conf: Full frame için confidence eşiği.
+        base_deep_conf: Crop/tile bölgeleri için confidence eşiği.
+
+    Returns:
+        Region için kullanılacak confidence değeri.
+    """
+    if region_name == "full":
+        return base_full_conf
+
+    if region_name in {"horizon_strip", "sea_band"}:
+        return base_deep_conf
+
+    if region_name.startswith("tile_"):
+        return base_deep_conf
+
+    return base_full_conf
+
+
 def run_yolo_region(
     frame: np.ndarray,
     model: object,
@@ -767,7 +965,7 @@ def run_yolo_region(
         iou=YOLO_IOU_THRES,
         verbose=False,
         classes=[8],
-        max_det=25 if channel == "thermal" else 50,
+        max_det=25 if channel == "thermal" else 60,
         device=YOLO_DEVICE,
         half=YOLO_HALF,
     )
@@ -831,7 +1029,24 @@ def detection_quality_score(det: Detection) -> float:
     area_score = min(area / (PROCESS_WIDTH * PROCESS_HEIGHT), 0.35)
     water_score = float(det["water_y"]) / PROCESS_HEIGHT
 
-    return 2.2 * float(det["conf"]) + 1.2 * area_score + 0.8 * water_score
+    # Horizon/tile kaynaklı detection'lara küçük avantaj verilir. Uzak hedefler
+    # çoğunlukla bu bölgelerden daha doğru yakalanır.
+    source = str(det.get("source", ""))
+    region_bonus = 0.0
+
+    if source == "horizon_strip":
+        region_bonus = 0.25
+    elif source == "sea_band":
+        region_bonus = 0.18
+    elif source.startswith("tile_"):
+        region_bonus = 0.12
+
+    return (
+        2.2 * float(det["conf"])
+        + 1.2 * area_score
+        + 0.8 * water_score
+        + region_bonus
+    )
 
 
 def same_vessel(det_a: Detection, det_b: Detection) -> bool:
@@ -893,6 +1108,7 @@ def merge_detection_group(
         "water_x": water_x,
         "water_y": water_y,
         "source": main_det["source"],
+        "channel": main_det.get("channel", "rgb"),
     }
 
 
@@ -961,9 +1177,10 @@ def detect_boats(
         Birleştirilmiş ve filtrelenmiş tekne detection listesi.
     """
     is_thermal = channel == "thermal"
+    fov_h = get_sensor_fov_h(sensor_info)
 
     if is_thermal:
-        if float(sensor_info["fov_h"]) < 20.0:
+        if fov_h < MID_FOV_H_DEG:
             imgsz = THERMAL_YOLO_IMGSZ_DEEP
         else:
             imgsz = THERMAL_YOLO_IMGSZ_FULL
@@ -972,7 +1189,7 @@ def detect_boats(
         conf_deep = THERMAL_YOLO_CONF_DEEP
         detection_frame = prepare_frame_for_detection(frame, "thermal")
     else:
-        if float(sensor_info["fov_h"]) < 20.0:
+        if fov_h < MID_FOV_H_DEG:
             imgsz = YOLO_IMGSZ_DEEP
         else:
             imgsz = YOLO_IMGSZ_FULL
@@ -984,8 +1201,12 @@ def detect_boats(
     regions = build_search_regions(sensor_info, horizon_state, mode)
     detections: list[Detection] = []
 
-    # İlk geçişte normal confidence eşiğiyle bütün bölgeler taranır.
+    # İlk geçişte region'a göre confidence seçilir. Full frame daha sert,
+    # horizon/tile bölgeleri küçük hedefler için daha esnek çalışır.
     for region in regions:
+        region_name = region[0]
+        conf = region_confidence(region_name, conf_full, conf_deep)
+
         detections.extend(
             run_yolo_region(
                 detection_frame,
@@ -993,7 +1214,7 @@ def detect_boats(
                 region,
                 sensor_info,
                 horizon_state,
-                conf_full,
+                conf,
                 imgsz,
                 channel=channel,
             )
