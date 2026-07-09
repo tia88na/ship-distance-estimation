@@ -770,18 +770,30 @@ def fuse_horizon_and_size_distance(
         min(horizon_distance_float, size_distance_float), 1.0
     )
 
-    if ratio > DISAGREEMENT_RATIO_THRES:
-        # Dar FOV/zoom kayıtlarında horizon tabanlı hesap birkaç piksel waterline
-        # hatasından çok etkilenir. Bbox-size sonucu makul güvene sahipse horizon
-        # sonucunu sadece yardımcı sinyal olarak bırakıyoruz.
-        if size_confidence >= 0.30:
-            size_weight = 0.92
-            horizon_weight = 0.08
-            reason = "size_dominant_disagreement"
-        else:
-            size_weight = SIZE_WEIGHT_DEFAULT
-            horizon_weight = HORIZON_WEIGHT_DEFAULT
-            reason = "hybrid_disagreement_low_confidence"
+if ratio > DISAGREEMENT_RATIO_THRES:
+    # Dar FOV/zoom kayıtlarında horizon tabanlı hesap birkaç piksel waterline
+    # hatasından etkilenebilir. Ancak bbox-size sonucunu da kör şekilde baskın
+    # yapmıyoruz. Çünkü YOLO geminin tamamını değil, sadece bir kısmını kutuya
+    # aldıysa bbox küçük kalır ve size-distance mesafeyi gereğinden fazla büyütür.
+    #
+    # Bu nedenle size ağırlığı artık sabit 0.92 değil; size confidence değerine
+    # göre kademeli verilir. Güven düşükse horizon sonucu daha fazla korunur.
+    if size_confidence >= 0.60:
+        size_weight = 0.82
+        horizon_weight = 0.18
+        reason = "size_dominant_high_confidence"
+    elif size_confidence >= 0.42:
+        size_weight = 0.72
+        horizon_weight = 0.28
+        reason = "size_dominant_medium_confidence"
+    elif size_confidence >= 0.30:
+        size_weight = 0.62
+        horizon_weight = 0.38
+        reason = "size_dominant_low_confidence"
+    else:
+        size_weight = SIZE_WEIGHT_DEFAULT
+        horizon_weight = HORIZON_WEIGHT_DEFAULT
+        reason = "hybrid_disagreement_low_confidence"
     else:
         # İki yöntem birbirine yakınsa güven skorlarıyla ağırlıklandırılır.
         # Bu durumda horizon sonucu tamamen atılmaz.
