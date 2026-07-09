@@ -170,9 +170,9 @@ def parse_time_to_seconds(
 def normalize_fov(value: float | None, default_value: float) -> float:
     """FOV değerini derece cinsinden güvenli aralığa normalize eder.
 
-    Bazı eski kaynaklarda FOV radyan olarak gelebilir. Ancak yeni kayıt
-    dosyalarında dar zoom değerleri 1-3 derece aralığında gelebilir. Bu nedenle
-    küçük her değeri otomatik radyan kabul etmek yanlış olur.
+    Yeni kayıt dosyalarında dar zoom FOV değerleri 1-3 derece aralığında
+    gelebilir. Bu yüzden küçük her değeri otomatik radyan kabul etmek yanlıştır.
+    Örneğin fov_h_rgb=2.36 değeri derece olarak korunmalıdır.
 
     Args:
         value: CSV'den okunan FOV değeri.
@@ -184,25 +184,21 @@ def normalize_fov(value: float | None, default_value: float) -> float:
     if value is None:
         return default_value
 
-    if value <= MIN_VALID_FOV_DEG:
+    if value <= 0.01:
         return default_value
 
-    # 1-3 derece aralığı iki anlama gelebilir:
-    # 1) Gerçekten derece cinsinden dar zoom FOV değeri olabilir.
-    # 2) Eski bir kaynakta radyan cinsinden yazılmış değer olabilir.
-    #
-    # Bu ayrımı yapmak için radyana çevrilmiş değerin default FOV'a makul
-    # yakınlıkta olup olmadığına bakıyoruz. Çevrilmiş değer default FOV'dan çok
-    # büyükse, gelen değeri derece kabul ediyoruz.
-    if value < RADIAN_LIKE_FOV_LIMIT:
+    # 1-3 derece aralığı dar zoom için geçerli olabilir.
+    # Eski bazı kaynaklar radyan verebilir; bu yüzden sadece radyana çevrilmiş
+    # değer default FOV'a makul yakınsa dönüşüm yapılır.
+    if value < 3.2:
         value_as_degrees = math.degrees(value)
 
-        if value_as_degrees <= default_value * RADIAN_CONVERSION_TOLERANCE:
+        if value_as_degrees <= default_value * 1.25:
             return value_as_degrees
 
         return value
 
-    if value > MAX_VALID_FOV_DEG:
+    if value > 120.0:
         return default_value
 
     return value
