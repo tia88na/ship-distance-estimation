@@ -720,6 +720,9 @@ def fuse_horizon_and_size_distance(
     )
     size_confidence = safe_float(size_result.get("confidence"), 0.0)
 
+    # Sadece bbox-size hesabı geçerliyse, sonucu doğrudan bbox-size mesafeden
+    # üretiriz. Bu durum genellikle waterline/ufuk hesabının geçersiz kaldığı
+    # ama bbox boyutunun kullanılabilir olduğu karelerde olur.
     if size_valid and not horizon_valid:
         return {
             **horizon_result,
@@ -734,6 +737,8 @@ def fuse_horizon_and_size_distance(
             "size_result": size_result,
         }
 
+    # Sadece horizon hesabı geçerliyse eski davranış korunur. Ancak sonuç
+    # distance_source içinde horizon_only olarak işaretlenir.
     if horizon_valid and not size_valid:
         return {
             **horizon_result,
@@ -744,6 +749,7 @@ def fuse_horizon_and_size_distance(
             "size_result": size_result,
         }
 
+    # İki yöntem de geçerli değilse bu track için mesafe üretilemez.
     if not horizon_valid or not size_valid:
         return {
             **horizon_result,
@@ -764,19 +770,21 @@ def fuse_horizon_and_size_distance(
         min(horizon_distance_float, size_distance_float), 1.0
     )
 
-if ratio > DISAGREEMENT_RATIO_THRES:
-    # Dar FOV/zoom kayıtlarında horizon tabanlı hesap birkaç piksel waterline
-    # hatasından çok etkilenir. Bbox-size sonucu makul güvene sahipse horizon
-    # sonucunu sadece yardımcı sinyal olarak bırakıyoruz.
-    if size_confidence >= 0.30:
-        size_weight = 0.92
-        horizon_weight = 0.08
-        reason = "size_dominant_disagreement"
+    if ratio > DISAGREEMENT_RATIO_THRES:
+        # Dar FOV/zoom kayıtlarında horizon tabanlı hesap birkaç piksel waterline
+        # hatasından çok etkilenir. Bbox-size sonucu makul güvene sahipse horizon
+        # sonucunu sadece yardımcı sinyal olarak bırakıyoruz.
+        if size_confidence >= 0.30:
+            size_weight = 0.92
+            horizon_weight = 0.08
+            reason = "size_dominant_disagreement"
         else:
             size_weight = SIZE_WEIGHT_DEFAULT
             horizon_weight = HORIZON_WEIGHT_DEFAULT
             reason = "hybrid_disagreement_low_confidence"
     else:
+        # İki yöntem birbirine yakınsa güven skorlarıyla ağırlıklandırılır.
+        # Bu durumda horizon sonucu tamamen atılmaz.
         size_weight = SIZE_WEIGHT_DEFAULT * size_confidence
         horizon_weight = HORIZON_WEIGHT_DEFAULT * horizon_confidence
         reason = "hybrid_agree"

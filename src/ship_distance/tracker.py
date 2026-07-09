@@ -791,9 +791,7 @@ def clamp_range_change(
 
 
 def get_hybrid_raw_distance(
-    track: Track,
-    sensor_info: SensorRow,
-    horizon_state: HorizonState,
+    track: Track, sensor_info: SensorRow, horizon_state: HorizonState
 ) -> DistanceResult:
     """Track kutusu için hibrit ham mesafe sonucunu üretir.
 
@@ -812,11 +810,7 @@ def get_hybrid_raw_distance(
 
     return cast(
         DistanceResult,
-        estimate_hybrid_distance_from_box(
-            box,
-            sensor_info,
-            horizon_state,
-        ),
+        estimate_hybrid_distance_from_box(box, sensor_info, horizon_state),
     )
 
 

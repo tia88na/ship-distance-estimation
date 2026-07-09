@@ -649,15 +649,7 @@ def build_search_regions(
 
     # Dar zoomda aramayı alt bina/çatı bölgesine kadar indirmiyoruz. Böylece
     # sahil yapılarının YOLO tarafından boat sanılma ihtimali azalır.
-    regions.append(
-        (
-            "sea_band",
-            0,
-            max(0, y_h - 30),
-            PROCESS_WIDTH,
-            y_bottom,
-        )
-    )
+    regions.append(("sea_band", 0, max(0, y_h - 30), PROCESS_WIDTH, y_bottom))
 
     if mode == "bottom_deep":
         # Alt bölgeler sadece özel modda eklenir. Bu mod yakın hedefleri
