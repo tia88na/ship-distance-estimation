@@ -4,6 +4,12 @@ Bu dosya RGB ve termal video akışlarıyla eşleşen sensör verilerini okur.
 CSV içinden zaman, FOV, zoom, tilt, roll ve pan kolonları bulunur. Daha sonra
 video zamanına göre ilgili sensör değeri seçilir veya iki satır arasında
 interpolation yapılır.
+
+Önemli not:
+Yeni kayıt dosyalarında FOV kolonları dar zoom değerleriyle gelebilir.
+Örneğin fov_h_rgb=2.36 ve fov_v_rgb=1.33 değerleri derece cinsinden geçerli
+dar FOV değerleridir. Bu nedenle küçük her FOV değerini otomatik radyan kabul
+etmek hatalı mesafe hesabına yol açar.
 """
 
 import bisect
@@ -20,6 +26,11 @@ DEFAULT_FOV_H_DEG = 65.7
 DEFAULT_FOV_V_DEG = 39.9
 DEFAULT_THERMAL_FOV_H_DEG = 32.4
 DEFAULT_THERMAL_FOV_V_DEG = 24.6
+
+MIN_VALID_FOV_DEG = 0.01
+MAX_VALID_FOV_DEG = 120.0
+RADIAN_LIKE_FOV_LIMIT = 3.2
+RADIAN_CONVERSION_TOLERANCE = 1.25
 
 
 def parse_float(value: object) -> float | None:
@@ -76,7 +87,7 @@ def find_column(
     # hale getirilir.
     lowered = {name.lower().strip(): name for name in fieldnames}
 
-    # Önce birebir kolon adı eşleşmesi aranır.
+    # Önce birebir kolon adı eşleşmesi aranır. Bu en güvenli yoldur.
     for possible in possible_names:
         key = possible.lower().strip()
 
@@ -84,6 +95,7 @@ def find_column(
             return lowered[key]
 
     # Birebir eşleşme yoksa kolon adının içinde geçen ifadeler kontrol edilir.
+    # Bu fallback, farklı isimlendirilmiş CSV dosyalarıyla uyumluluk sağlar.
     for name in fieldnames:
         low = name.lower().strip()
 
@@ -158,9 +170,9 @@ def parse_time_to_seconds(
 def normalize_fov(value: float | None, default_value: float) -> float:
     """FOV değerini derece cinsinden güvenli aralığa normalize eder.
 
-    Bazı kaynaklarda FOV radyan olarak gelebilir. Değer küçük bir aralıkta ise
-    radyan kabul edilip dereceye çevrilir. Geçersiz veya aşırı büyük değerlerde
-    varsayılan FOV kullanılır.
+    Bazı eski kaynaklarda FOV radyan olarak gelebilir. Ancak yeni kayıt
+    dosyalarında dar zoom değerleri 1-3 derece aralığında gelebilir. Bu nedenle
+    küçük her değeri otomatik radyan kabul etmek yanlış olur.
 
     Args:
         value: CSV'den okunan FOV değeri.
@@ -172,14 +184,25 @@ def normalize_fov(value: float | None, default_value: float) -> float:
     if value is None:
         return default_value
 
-    # 0.01 ile 3.2 arası değerler büyük ihtimalle radyan formatındadır.
-    if 0.01 < value < 3.2:
-        value = math.degrees(value)
-
-    if value <= 0.01:
+    if value <= MIN_VALID_FOV_DEG:
         return default_value
 
-    if value > 120.0:
+    # 1-3 derece aralığı iki anlama gelebilir:
+    # 1) Gerçekten derece cinsinden dar zoom FOV değeri olabilir.
+    # 2) Eski bir kaynakta radyan cinsinden yazılmış değer olabilir.
+    #
+    # Bu ayrımı yapmak için radyana çevrilmiş değerin default FOV'a makul
+    # yakınlıkta olup olmadığına bakıyoruz. Çevrilmiş değer default FOV'dan çok
+    # büyükse, gelen değeri derece kabul ediyoruz.
+    if value < RADIAN_LIKE_FOV_LIMIT:
+        value_as_degrees = math.degrees(value)
+
+        if value_as_degrees <= default_value * RADIAN_CONVERSION_TOLERANCE:
+            return value_as_degrees
+
+        return value
+
+    if value > MAX_VALID_FOV_DEG:
         return default_value
 
     return value
@@ -189,8 +212,8 @@ def channel_column_names(base_names: list[str], channel: str) -> list[str]:
     """Kanal tipine göre olası CSV kolon adlarını üretir.
 
     RGB ve termal kanal için aynı temel bilgi farklı eklerle yazılmış olabilir.
-    Örneğin fov_h_rgb, rgb_fov_h, fov_hthermal gibi varyasyonlar bu fonksiyonla
-    üretilir.
+    Örneğin fov_h_rgb, rgb_fov_h, fov_h_thr, fov_v_thr, zoom_rgb veya zoom_thr
+    gibi varyasyonlar bu fonksiyonla üretilir.
 
     Args:
         base_names: Temel kolon adı adayları.
@@ -203,7 +226,9 @@ def channel_column_names(base_names: list[str], channel: str) -> list[str]:
 
     channel_aliases = {
         "rgb": ["rgb", "visible", "vis", "color"],
-        "thermal": ["thermal", "therm", "ir", "tir", "th"],
+        # Yeni CSV dosyalarında termal kanal "thr" kısaltmasıyla geliyor:
+        # fov_h_thr, fov_v_thr, zoom_thr.
+        "thermal": ["thermal", "therm", "ir", "tir", "th", "thr"],
     }
 
     # Her temel kolon adı, ilgili kanal alias'larıyla farklı biçimlerde denenir.
@@ -218,7 +243,8 @@ def channel_column_names(base_names: list[str], channel: str) -> list[str]:
                 ]
             )
 
-    # Kanal eki olmayan temel adlar da arama listesine eklenir.
+    # Kanal eki olmayan temel adlar da arama listesine eklenir. Bu fallback,
+    # sadece tek kanal içeren eski CSV dosyaları için korunur.
     names.extend(base_names)
 
     unique_names: list[str] = []
@@ -399,11 +425,16 @@ def load_sensor_csv(
             roll = parse_float(row.get(roll_col)) if roll_col else None
             pan = parse_float(row.get(pan_col)) if pan_col else None
 
+            # FOV değerleri derece cinsinden normalize edilir. Dar zoom FOV
+            # değerleri yanlışlıkla default değere düşürülmez.
+            normalized_fov_h = normalize_fov(fov_h, default_fov_h)
+            normalized_fov_v = normalize_fov(fov_v, default_fov_v)
+
             rows.append(
                 {
                     "second": float(second),
-                    "fov_h": normalize_fov(fov_h, default_fov_h),
-                    "fov_v": normalize_fov(fov_v, default_fov_v),
+                    "fov_h": normalized_fov_h,
+                    "fov_v": normalized_fov_v,
                     "zoom": zoom,
                     "tilt": tilt,
                     "roll": roll,
@@ -416,6 +447,20 @@ def load_sensor_csv(
     rows.sort(key=lambda item: item["second"])
 
     print(f"Okunan sensor satiri ({channel}): {len(rows)}")
+
+    if rows:
+        first_row = rows[0]
+
+        # İlk satırı kısa şekilde basmak, yanlış FOV kolonunun okunup okunmadığını
+        # hızlıca görmeyi sağlar. Özellikle yeni kayıtlarda RGB FOV değerleri
+        # 2 derece civarında beklenir.
+        print(
+            f"Ilk sensor ({channel}): "
+            f"fov_h={first_row['fov_h']} | "
+            f"fov_v={first_row['fov_v']} | "
+            f"zoom={first_row['zoom']} | "
+            f"tilt={first_row['tilt']}"
+        )
 
     return rows
 
