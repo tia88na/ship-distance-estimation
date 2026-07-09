@@ -4,6 +4,18 @@ Bu dosya detection sonuçlarını zaman içinde track haline getirir. KLT optica
 flow, global kamera hareketi, detection-track eşleştirme, FOV değişimine göre
 track kutusu ölçekleme ve mesafe değerinin frame'ler arasında yumuşatılması
 burada yapılır.
+
+Önemli mesafe notu:
+Önceki sürümde mesafe yalnızca track içindeki waterline noktasından ve ufuk
+çizgisinden hesaplanıyordu. Bu yöntem bbox su hattı birkaç piksel hatalıysa
+özellikle dar FOV/zoom kayıtlarında kilometre seviyesinde sapma üretebilir.
+
+Bu sürümde tracker, geometry.py içindeki hibrit mesafe fonksiyonunu kullanır.
+Yani her track için:
+1. Horizon/waterline tabanlı mesafe,
+2. Bbox piksel boyutu + FOV/zoom tabanlı mesafe,
+3. Bu iki sonucun güven skoruna göre birleşimi
+beraber değerlendirilir.
 """
 
 from collections import deque
@@ -27,7 +39,7 @@ from geometry import (
     PROCESS_HEIGHT,
     PROCESS_WIDTH,
     clamp_horizon_y,
-    sea_distance_from_image_point,
+    estimate_hybrid_distance_from_box,
 )
 import numpy as np
 from sensor_reader import SensorRow
@@ -72,7 +84,7 @@ RANGE_INIT_SAMPLE_COUNT = 4
 RANGE_HISTORY_WINDOW = 25
 RANGE_UPDATE_ALPHA_DETECTED = 0.20
 RANGE_UPDATE_ALPHA_KLT = 0.06
-MAX_ACCEPTED_RAW_JUMP_RATIO = 1.60
+MAX_ACCEPTED_RAW_JUMP_RATIO = 1.80
 RANGE_REJECTS_TO_RELOCK = 12
 RANGE_RELATIVE_RATE_PER_SEC = 0.10
 RANGE_MIN_RATE_M_PER_SEC = 2.0
@@ -248,7 +260,9 @@ def apply_fov_rescale(
             vy2 * scale_y,
         )
 
-        # Su hattı geçmişi y ekseninde ölçeklenir.
+        # Su hattı geçmişi y ekseninde ölçeklenir. Bu, FOV değişimi sonrası
+        # eski waterline ölçümlerinin yeni görüntü ölçeğiyle uyumlu kalmasını
+        # sağlar.
         water_hist = cast(deque[float], track["water_hist"])
         old_hist = list(water_hist)
         water_hist.clear()
@@ -515,8 +529,10 @@ def refresh_track_water_point(track: Track, sensor_info: SensorRow) -> None:
 
     water_hist = cast(deque[float], track["water_hist"])
 
-    # Su hattı y değeri median ile yumuşatılır. Bu, mesafe hesabındaki zıplamayı
-    # azaltır.
+    # Su hattı y değeri median ile yumuşatılır. Bu, horizon-only mesafe
+    # hesabındaki zıplamayı azaltır. Hibrit hesap artık doğrudan box boyutunu da
+    # kullandığı için water point tek kaynak değildir, ama backward uyumluluk ve
+    # debug bilgisi için korunur.
     water_hist.append(water_y)
     track["water_x"] = water_x
     track["water_y"] = median(water_hist)
@@ -564,6 +580,10 @@ def create_new_track(
         "range_history": deque(maxlen=RANGE_HISTORY_WINDOW),
         "range_reject_count": 0,
         "recent_raws": deque(maxlen=RECENT_RAW_WINDOW),
+        # Son mesafe kaynağı debug için saklanır. Örn: hybrid, size_only,
+        # horizon_only. Görselleştirmede veya loglamada kullanılabilir.
+        "distance_source": None,
+        "distance_confidence": 0.0,
     }
 
 
@@ -770,13 +790,68 @@ def clamp_range_change(
     return max(lower, min(upper, candidate_distance))
 
 
+def get_hybrid_raw_distance(
+    track: Track,
+    sensor_info: SensorRow,
+    horizon_state: HorizonState,
+) -> DistanceResult:
+    """Track kutusu için hibrit ham mesafe sonucunu üretir.
+
+    Args:
+        track: Mesafesi hesaplanacak track.
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+        horizon_state: Güncel ufuk çizgisi durumu.
+
+    Returns:
+        geometry.py içindeki hibrit mesafe sonucu.
+    """
+    # Hibrit hesap doğrudan track box'ını kullanır. Böylece sadece waterline
+    # noktasına bağlı kalmaz; bbox genişliği/yüksekliği de mesafe tahminine
+    # dahil edilir.
+    box = cast(Box, track["box"])
+
+    return cast(
+        DistanceResult,
+        estimate_hybrid_distance_from_box(
+            box,
+            sensor_info,
+            horizon_state,
+        ),
+    )
+
+
+def distance_alpha_from_confidence(
+    track: Track, raw_result: DistanceResult
+) -> float:
+    """Mesafe güncelleme alpha değerini ölçüm güvenine göre ayarlar.
+
+    Args:
+        track: Güncellenecek track.
+        raw_result: Hibrit mesafe sonucu.
+
+    Returns:
+        Range smoothing için kullanılacak alpha değeri.
+    """
+    confidence = float(raw_result.get("distance_confidence", 0.30))
+
+    if int(track.get("frames_since_update", 0)) <= 2:
+        base_alpha = RANGE_UPDATE_ALPHA_DETECTED
+    else:
+        base_alpha = RANGE_UPDATE_ALPHA_KLT
+
+    # Güven düşükse yeni mesafenin etkisi azaltılır. Güven yüksekse mevcut
+    # alpha korunur. Bu özellikle KLT ile taşınan ama detection almayan kutularda
+    # mesafenin aşırı zıplamasını engeller.
+    return base_alpha * max(0.35, min(1.0, confidence / 0.55))
+
+
 def calculate_track_distance(
     track: Track,
     sensor_info: SensorRow,
     horizon_state: HorizonState,
     video_fps: float,
 ) -> DistanceResult:
-    """Track için su hattı noktasından mesafe hesaplar ve sonucu yumuşatır.
+    """Track için hibrit mesafe hesaplar ve sonucu yumuşatır.
 
     Args:
         track: Mesafesi hesaplanacak track.
@@ -787,15 +862,12 @@ def calculate_track_distance(
     Returns:
         Mesafe hesaplama sonucu.
     """
-    raw_result = cast(
-        DistanceResult,
-        sea_distance_from_image_point(
-            float(track["water_x"]),
-            float(track["water_y"]),
-            sensor_info,
-            horizon_state,
-        ),
-    )
+    raw_result = get_hybrid_raw_distance(track, sensor_info, horizon_state)
+
+    # Debug ve ileride görselleştirme için son mesafe kaynağı track üzerinde
+    # saklanır. Örn: hybrid, size_only, horizon_only.
+    track["distance_source"] = raw_result.get("distance_source")
+    track["distance_confidence"] = raw_result.get("distance_confidence", 0.0)
 
     if not raw_result["valid"]:
         last = cast(DistanceResult | None, track.get("last_result"))
@@ -808,7 +880,8 @@ def calculate_track_distance(
             return raw_result
 
         # Yeni sonuç geçersiz ama önceki geçerli sonuç varsa ekranda son geçerli
-        # mesafe korunur.
+        # mesafe korunur. Böylece tek karelik bbox/KLT hatası ekrana ani "?"/0
+        # olarak yansımaz.
         if last is not None and last.get("valid"):
             return last
 
@@ -827,7 +900,9 @@ def calculate_track_distance(
 
         locked_distance = median(init_samples)
 
-        # İlk birkaç örnek alındıktan sonra mesafe kilidi başlatılır.
+        # İlk birkaç örnek alındıktan sonra mesafe kilidi başlatılır. İlk
+        # frame'lerde detection ve KLT hâlâ oturduğu için median başlangıç daha
+        # stabil sonuç verir.
         if len(init_samples) >= RANGE_INIT_SAMPLE_COUNT:
             track["range_locked_m"] = locked_distance
             track["range_last_frame"] = int(track.get("global_frame_index", 0))
@@ -864,7 +939,8 @@ def calculate_track_distance(
         track["range_reject_count"] = int(track["range_reject_count"]) + 1
 
         # Çok sayıda ham mesafe reddedilirse son ham örneklerin median değeriyle
-        # yeniden kilit kurulur.
+        # yeniden kilit kurulur. Bu durum genelde bbox şekli veya mesafe kaynağı
+        # değiştiğinde oluşur.
         if (
             int(track["range_reject_count"]) >= RANGE_REJECTS_TO_RELOCK
             and len(recent_raws) >= 5
@@ -877,11 +953,7 @@ def calculate_track_distance(
             candidate_distance = previous_locked
     else:
         track["range_reject_count"] = 0
-
-        if int(track.get("frames_since_update", 0)) <= 2:
-            alpha = RANGE_UPDATE_ALPHA_DETECTED
-        else:
-            alpha = RANGE_UPDATE_ALPHA_KLT
+        alpha = distance_alpha_from_confidence(track, raw_result)
 
         candidate_distance = (
             1.0 - alpha
