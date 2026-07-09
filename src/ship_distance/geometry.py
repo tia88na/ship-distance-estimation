@@ -63,17 +63,20 @@ HORIZON_TILT_ONLY_MAX_STEP_MOVING_PX = 9.0
 
 HORIZON_MEDIAN_WINDOW = 21
 
-# Bbox-size mesafe hesabında gemi tipi kesin seçilmez. Bunun yerine büyük/orta
-# deniz aracı için makul görünür uzunluk ve görünür yükseklik aralıkları
-# kullanılır. Bu sayede kameraya önden bakan büyük gemi, otomatik olarak küçük
-# tekne sayılmaz.
-SHIP_VISIBLE_LENGTH_M = 70.0
-SHIP_VISIBLE_LENGTH_MIN_M = 35.0
-SHIP_VISIBLE_LENGTH_MAX_M = 180.0
+# İlk test videosundaki hedefler küçük tekne değil, çoğunlukla büyük yük/kargo
+# gemisi görünümünde. Bu nedenle yandan görünen uzun bbox'larda gerçek görünen
+# gemi uzunluğu daha büyük kabul edilir. Önden/diyagonal görünen gemilerde ise
+# width-based hesap zaten düşük güvenle kullanılacaktır.
+SHIP_VISIBLE_LENGTH_M = 130.0
+SHIP_VISIBLE_LENGTH_MIN_M = 70.0
+SHIP_VISIBLE_LENGTH_MAX_M = 260.0
 
-SHIP_VISIBLE_HEIGHT_M = 18.0
-SHIP_VISIBLE_HEIGHT_MIN_M = 8.0
-SHIP_VISIBLE_HEIGHT_MAX_M = 45.0
+# Yük gemilerinde su üstünde görünen toplam yükseklik, küçük tekneye göre daha
+# büyüktür. Height-based hesap kesin sonuç vermez ama kompakt görünümde destek
+# sinyali olarak kullanılır.
+SHIP_VISIBLE_HEIGHT_M = 26.0
+SHIP_VISIBLE_HEIGHT_MIN_M = 12.0
+SHIP_VISIBLE_HEIGHT_MAX_M = 60.0
 
 # Dar FOV/zoom durumunda horizon-only hesap birkaç piksel hatadan çok etkilenir.
 # Bu nedenle bbox-size sonucu, yeterince güvenilir olduğunda daha yüksek ağırlık
@@ -761,14 +764,14 @@ def fuse_horizon_and_size_distance(
         min(horizon_distance_float, size_distance_float), 1.0
     )
 
-    if ratio > DISAGREEMENT_RATIO_THRES:
-        # Bbox-size sonucu makul güvene sahipse ve horizon ile ciddi çelişiyorsa
-        # dar FOV senaryosunda size sonucu baskın alınır. Bu, yanlış waterline
-        # noktasının mesafeyi 6-10 km yerine 1 km seviyesine düşürmesini engeller.
-        if size_confidence >= 0.30:
-            size_weight = 0.82
-            horizon_weight = 0.18
-            reason = "size_dominant_disagreement"
+if ratio > DISAGREEMENT_RATIO_THRES:
+    # Dar FOV/zoom kayıtlarında horizon tabanlı hesap birkaç piksel waterline
+    # hatasından çok etkilenir. Bbox-size sonucu makul güvene sahipse horizon
+    # sonucunu sadece yardımcı sinyal olarak bırakıyoruz.
+    if size_confidence >= 0.30:
+        size_weight = 0.92
+        horizon_weight = 0.08
+        reason = "size_dominant_disagreement"
         else:
             size_weight = SIZE_WEIGHT_DEFAULT
             horizon_weight = HORIZON_WEIGHT_DEFAULT
