@@ -4,6 +4,12 @@ Bu dosya tek bir video frame'i işlerken kullanılan ana akışı içerir. Her f
 için sensör bilgisi alınır, FOV değişimi takip edilir, kamera hareketi tahmin
 edilir, ufuk çizgisi güncellenir, gerektiğinde tekne tespiti yapılır ve mevcut
 track listesi güncellenir.
+
+Not:
+    RGB ve termal akışlar bu dosyada hâlâ ayrı ayrı işlenir. Bu yüzden gerçek
+    RGB-thermal obje eşleştirme bu dosyanın tek başına görevi değildir. Ancak
+    dar FOV / zoomlu termal görüntülerde bbox-size kaynaklı mesafe sapmalarını
+    azaltmak için termal track'lere ek güvenlik düzeltmesi uygulanır.
 """
 
 import math
@@ -35,6 +41,16 @@ ZOOM_SCALE_EPS = 0.0015
 ZOOM_ACTIVE_SCALE = 0.006
 THERMAL_DETECT_WHILE_MOVING = False
 
+# Termal görüntüde FOV çok dar veya zoom çok yüksek olduğunda, YOLO kutusu
+# çoğu zaman geminin tamamını değil geminin sadece kabin/gövde parçasını alır.
+# Bu durumda bbox-size mesafe hesabı aynı fiziksel gemiyi RGB'ye göre daha uzak
+# gösterebilir. Aşağıdaki eşikler sadece termal akışta kullanılır.
+THERMAL_NARROW_FOV_H_DEG = 12.0
+THERMAL_NARROW_FOV_V_DEG = 9.0
+THERMAL_HIGH_ZOOM = 0.85
+THERMAL_LARGE_BBOX_AREA_RATIO = 0.035
+THERMAL_PARTIAL_BBOX_WIDTH_RATIO = 0.55
+
 
 def create_stream_state(name: str, channel: str) -> StreamState:
     """Bir video akışı için başlangıç state sözlüğünü oluşturur.
@@ -64,6 +80,253 @@ def create_stream_state(name: str, channel: str) -> StreamState:
         "force_detection": False,
         "mode": "init",
     }
+
+
+def safe_float(value: object, default: float) -> float:
+    """Bir değeri güvenli şekilde float'a çevirir.
+
+    Args:
+        value: Float'a çevrilecek değer.
+        default: Dönüşüm başarısızsa kullanılacak değer.
+
+    Returns:
+        Float değer.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    """Sayısal değeri verilen aralıkta sınırlar.
+
+    Args:
+        value: Sınırlandırılacak değer.
+        min_value: Alt sınır.
+        max_value: Üst sınır.
+
+    Returns:
+        Sınırlandırılmış değer.
+    """
+    return max(min_value, min(max_value, value))
+
+
+def weighted_log_blend(
+    value_a: float, weight_a: float, value_b: float, weight_b: float
+) -> float:
+    """İki pozitif mesafeyi logaritmik ağırlıkla birleştirir.
+
+    Mesafe hataları genellikle çarpansal büyüdüğü için logaritmik ortalama,
+    doğrudan aritmetik ortalamaya göre daha stabil davranır.
+
+    Args:
+        value_a: İlk mesafe.
+        weight_a: İlk mesafe ağırlığı.
+        value_b: İkinci mesafe.
+        weight_b: İkinci mesafe ağırlığı.
+
+    Returns:
+        Ağırlıklandırılmış mesafe.
+    """
+    value_a = max(value_a, 1.0)
+    value_b = max(value_b, 1.0)
+    total_weight = max(weight_a + weight_b, 1e-6)
+
+    return math.exp(
+        (math.log(value_a) * weight_a + math.log(value_b) * weight_b)
+        / total_weight
+    )
+
+
+def get_track_box(track: dict[str, object]) -> tuple[float, float, float, float] | None:
+    """Track sözlüğünden bbox değerini bulur.
+
+    Tracker tarafında farklı isimlendirmeler kullanılabildiği için birkaç yaygın
+    alan adı kontrol edilir.
+
+    Args:
+        track: Tek bir track sözlüğü.
+
+    Returns:
+        Bbox tuple değeri veya bulunamazsa None.
+    """
+    for key in ("box", "bbox", "xyxy"):
+        value = track.get(key)
+
+        if isinstance(value, (list, tuple)) and len(value) >= 4:
+            return (
+                safe_float(value[0], 0.0),
+                safe_float(value[1], 0.0),
+                safe_float(value[2], 0.0),
+                safe_float(value[3], 0.0),
+            )
+
+    return None
+
+
+def get_track_distance(
+    track: dict[str, object],
+) -> tuple[str | None, float | None]:
+    """Track sözlüğündeki aktif mesafe alanını bulur.
+
+    Args:
+        track: Tek bir track sözlüğü.
+
+    Returns:
+        Mesafe alan adı ve mesafe değeri. Bulunamazsa ikisi de None olur.
+    """
+    for key in (
+        "distance",
+        "distance_m",
+        "smoothed_distance",
+        "filtered_distance",
+    ):
+        value = track.get(key)
+
+        if isinstance(value, int | float) and math.isfinite(float(value)):
+            return key, float(value)
+
+    return None, None
+
+
+def set_track_distance(
+    track: dict[str, object], distance_m: float
+) -> None:
+    """Track sözlüğündeki mesafe alanlarını günceller.
+
+    Args:
+        track: Güncellenecek track sözlüğü.
+        distance_m: Yeni mesafe değeri.
+    """
+    # Visualizer tarafı hangi alanı okuyorsa bozulmasın diye yaygın mesafe
+    # alanları birlikte güncellenir.
+    track["distance"] = distance_m
+    track["distance_m"] = distance_m
+
+    if "smoothed_distance" in track:
+        track["smoothed_distance"] = distance_m
+
+    if "filtered_distance" in track:
+        track["filtered_distance"] = distance_m
+
+
+def is_thermal_distance_risky(
+    box: tuple[float, float, float, float],
+    sensor_info: SensorRow,
+) -> tuple[bool, str]:
+    """Termal bbox mesafesinin riskli olup olmadığını değerlendirir.
+
+    Args:
+        box: Track bbox değeri.
+        sensor_info: Mevcut frame sensör bilgisi.
+
+    Returns:
+        Risk durumu ve risk sebebi.
+    """
+    x1, y1, x2, y2 = box
+
+    box_width = max(1.0, x2 - x1)
+    box_height = max(1.0, y2 - y1)
+    area_ratio = (box_width * box_height) / float(
+        PROCESS_WIDTH * PROCESS_HEIGHT
+    )
+
+    fov_h = safe_float(sensor_info.get("fov_h"), 65.7)
+    fov_v = safe_float(sensor_info.get("fov_v"), 39.9)
+    zoom = safe_float(sensor_info.get("zoom"), 0.0)
+
+    narrow_fov = (
+        fov_h <= THERMAL_NARROW_FOV_H_DEG
+        or fov_v <= THERMAL_NARROW_FOV_V_DEG
+        or zoom >= THERMAL_HIGH_ZOOM
+    )
+
+    if not narrow_fov:
+        return False, "thermal_fov_not_narrow"
+
+    if area_ratio >= THERMAL_LARGE_BBOX_AREA_RATIO:
+        return True, "thermal_large_bbox_in_narrow_fov"
+
+    if box_width <= PROCESS_WIDTH * THERMAL_PARTIAL_BBOX_WIDTH_RATIO:
+        return True, "thermal_partial_bbox_in_narrow_fov"
+
+    return False, "thermal_bbox_ok"
+
+
+def apply_thermal_distance_guard(
+    tracks: TrackMap,
+    sensor_info: SensorRow,
+) -> None:
+    """Dar FOV termal track'lerde mesafe sapmasını azaltır.
+
+    Bu fonksiyon video özelinde sabit mesafe ayarı yapmaz. Sadece termal görüntü
+    dar FOV/zoomlu olduğunda ve bbox kısmi/büyük göründüğünde devreye girer.
+
+    Mantık:
+        - Horizon mesafesi varsa ve final mesafe ondan fazla uzaklaşmışsa,
+          final mesafe horizon sonucuna doğru çekilir.
+        - Horizon mesafesi yoksa ama bbox dar FOV'da büyük/kısmi görünüyorsa,
+          mesafe sınırlı oranda aşağı çekilir.
+        - Confidence düşürülür ve track içine hangi kuralın çalıştığı yazılır.
+
+    Args:
+        tracks: Güncel track sözlüğü.
+        sensor_info: Mevcut frame sensör bilgisi.
+    """
+    for track in tracks.values():
+        box = get_track_box(track)
+
+        if box is None:
+            continue
+
+        risky, risk_reason = is_thermal_distance_risky(box, sensor_info)
+
+        if not risky:
+            continue
+
+        distance_key, current_distance = get_track_distance(track)
+
+        if distance_key is None or current_distance is None:
+            continue
+
+        horizon_distance = track.get("horizon_distance")
+        confidence = safe_float(track.get("distance_confidence"), 0.50)
+
+        adjusted_distance = current_distance
+        adjustment_reason = risk_reason
+
+        if isinstance(horizon_distance, int | float) and float(horizon_distance) > 1.0:
+            horizon_distance_float = float(horizon_distance)
+
+            # Termal final mesafe, horizon mesafesinden belirgin yüksekse
+            # dar-FOV bbox-size sapması olabilir. Bu durumda final sonucu horizon
+            # sonucuna doğru çekiyoruz ama tamamen horizon-only yapmıyoruz.
+            if current_distance > horizon_distance_float * 1.12:
+                adjusted_distance = weighted_log_blend(
+                    current_distance,
+                    0.30,
+                    horizon_distance_float,
+                    0.70,
+                )
+                adjustment_reason = f"{risk_reason}_blend_horizon"
+        else:
+            # Bazı track sürümlerinde horizon_distance tutulmayabilir. Bu durumda
+            # sadece dar-FOV termal ve riskli bbox için sınırlı bir düzeltme
+            # uygulanır. RGB veya geniş FOV bundan etkilenmez.
+            adjusted_distance = current_distance * 0.78
+            adjustment_reason = f"{risk_reason}_fallback_scale"
+
+        if adjusted_distance >= current_distance:
+            continue
+
+        set_track_distance(track, adjusted_distance)
+
+        track["thermal_distance_guard"] = True
+        track["thermal_distance_guard_reason"] = adjustment_reason
+        track["thermal_original_distance"] = current_distance
+        track["distance_source"] = "thermal_guard"
+        track["distance_confidence"] = clamp(confidence * 0.70, 0.03, 0.95)
 
 
 def process_stream_frame(
@@ -234,6 +497,11 @@ def process_stream_frame(
         global_flow=(gdx, gdy),
         global_flow_ok=gflow_ok,
     )
+
+    # RGB tarafı aynı kalır. Sadece dar FOV / zoomlu termal görüntülerde,
+    # kısmi bbox kaynaklı uzak mesafe sapması azaltılır.
+    if channel == "thermal":
+        apply_thermal_distance_guard(tracks, sensor_info)
 
     # Güncel track bilgileri bir sonraki frame için state'e yazılır.
     stream_state["tracks"] = tracks
