@@ -694,6 +694,92 @@ def weighted_log_average(
     )
 
 
+def apply_narrow_fov_size_penalty(
+    size_result: dict[str, Any],
+    box: Box,
+    sensor_info: dict[str, Any],
+) -> dict[str, Any]:
+    """Dar FOV / zoomlu görüntülerde bbox-size güvenini düşürür.
+
+    Dar FOV görüntülerde kamera nesneye daha yakın veya daha zoomlu bakar.
+    Bu durumda YOLO, geminin tamamı yerine kabin/gövde gibi sadece bir bölümünü
+    kutuya alabilir. Bbox küçük veya kısmi kaldığında pinhole/bbox-size hesabı
+    mesafeyi gereğinden büyük üretir.
+
+    Bu fonksiyon önceki videolardaki geniş FOV davranışını bozmaz. Sadece FOV
+    gerçekten dar olduğunda veya zoom yüksek olduğunda size-confidence değerini
+    düşürür. Final mesafede horizon/waterline hesabı daha fazla korunur.
+
+    Args:
+        size_result: estimate_distance_from_bbox_size çıktısı.
+        box: Detection veya track bounding box değeri.
+        sensor_info: FOV/zoom bilgilerini içeren sensör sözlüğü.
+
+    Returns:
+        Gerekirse confidence değeri düşürülmüş bbox-size sonucu.
+    """
+    if not size_result.get("valid"):
+        return size_result
+
+    x1, y1, x2, y2 = box
+
+    box_width = max(1.0, x2 - x1)
+    box_height = max(1.0, y2 - y1)
+    box_area_ratio = (box_width * box_height) / float(
+        PROCESS_WIDTH * PROCESS_HEIGHT
+    )
+
+    fov_h = safe_float(sensor_info.get("fov_h"), DEFAULT_FOV_H_DEG)
+    fov_v = safe_float(sensor_info.get("fov_v"), DEFAULT_FOV_V_DEG)
+    zoom = safe_float(sensor_info.get("zoom"), 0.0)
+
+    confidence = safe_float(size_result.get("confidence"), 0.0)
+
+    is_narrow_fov = fov_h <= 12.0 or fov_v <= 9.0 or zoom >= 0.85
+    is_very_narrow_fov = fov_h <= 9.0 or fov_v <= 7.0
+    is_large_close_bbox = box_area_ratio >= 0.040
+    is_partial_bbox = box_width < PROCESS_WIDTH * 0.50
+    is_edge_touched = (
+        x1 <= 2.0
+        or y1 <= 2.0
+        or x2 >= PROCESS_WIDTH - 3.0
+        or y2 >= PROCESS_HEIGHT - 3.0
+    )
+
+    penalty_factor = 1.0
+    reason = None
+
+    if is_very_narrow_fov and is_large_close_bbox:
+        # Termal yakın/zoomlu görüntüde bbox çoğu zaman geminin tüm uzunluğunu
+        # değil, sadece gövde/kabin parçasını içerir. Bu durumda size-distance
+        # fazla uzak sonuç verir.
+        penalty_factor = 0.35
+        reason = "very_narrow_fov_large_bbox"
+    elif is_narrow_fov and is_large_close_bbox:
+        penalty_factor = 0.45
+        reason = "narrow_fov_large_bbox"
+    elif is_narrow_fov and is_partial_bbox:
+        penalty_factor = 0.60
+        reason = "narrow_fov_partial_bbox"
+
+    if is_narrow_fov and is_edge_touched:
+        penalty_factor = min(penalty_factor, 0.55)
+        reason = "narrow_fov_edge_bbox"
+
+    if reason is None:
+        return size_result
+
+    adjusted_confidence = clamp(confidence * penalty_factor, 0.02, 0.95)
+
+    return {
+        **size_result,
+        "confidence": adjusted_confidence,
+        "narrow_fov_penalty": True,
+        "narrow_fov_penalty_factor": penalty_factor,
+        "narrow_fov_reason": reason,
+    }
+
+
 def fuse_horizon_and_size_distance(
     horizon_result: dict[str, Any],
     size_result: dict[str, Any],
@@ -833,8 +919,10 @@ def water_point_from_box_for_geometry(
 ) -> tuple[float, float]:
     """Geometry içinde bbox su hattı noktasını hesaplar.
 
-    detector.py içinde de benzer hesap vardır. Bu fonksiyon geometry.py içinde
-    dış bağımlılık oluşturmadan hibrit mesafe tahmini yapabilmek için tutulur.
+    Dar FOV / zoomlu termal görüntülerde bbox çoğu zaman geminin üst gövde
+    bölümüne oturur. Bu yüzden su hattı noktası bbox içinde daha aşağıdan
+    alınır. Geniş FOV davranışı korunur; önceki videolardaki ana RGB/uzak gemi
+    hesapları bu değişiklikten etkilenmez.
 
     Args:
         box: Detection veya track bounding box değeri.
@@ -844,11 +932,27 @@ def water_point_from_box_for_geometry(
         Su hattı x ve y piksel koordinatı.
     """
     x1, y1, x2, y2 = box
-    height = max(1.0, y2 - y1)
-    fov_h = safe_float(sensor_info.get("fov_h"), DEFAULT_FOV_H_DEG)
 
-    if fov_h < 15.0:
-        ratio = 0.86
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    area_ratio = (width * height) / float(PROCESS_WIDTH * PROCESS_HEIGHT)
+
+    fov_h = safe_float(sensor_info.get("fov_h"), DEFAULT_FOV_H_DEG)
+    fov_v = safe_float(sensor_info.get("fov_v"), DEFAULT_FOV_V_DEG)
+    zoom = safe_float(sensor_info.get("zoom"), 0.0)
+
+    is_narrow_fov = fov_h <= 12.0 or fov_v <= 9.0 or zoom >= 0.85
+    is_large_close_bbox = area_ratio >= 0.040
+
+    if is_narrow_fov and is_large_close_bbox:
+        # Yakın/zoomlu termal görüntüde kutu geminin tamamını değil üst kısmını
+        # içerebilir. Su hattını bbox altına daha yakın almak, aynı geminin RGB
+        # sonucundan gereksiz uzak görünmesini azaltır.
+        ratio = 0.96
+    elif is_narrow_fov:
+        ratio = 0.92
+    elif fov_h < 15.0:
+        ratio = 0.88
     else:
         ratio = 0.90
 
@@ -875,6 +979,9 @@ def estimate_hybrid_distance_from_box(
     )
 
     size_result = estimate_distance_from_bbox_size(box, sensor_info)
+    size_result = apply_narrow_fov_size_penalty(
+        size_result, box, sensor_info
+    )
 
     return fuse_horizon_and_size_distance(
         horizon_result, size_result, sensor_info
