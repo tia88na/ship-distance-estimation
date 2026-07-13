@@ -7,8 +7,9 @@ ait detection kutularını birleştirme adımları burada yönetilir.
 
 Bu sürümde ana hedef detection kalitesini iyileştirmektir. Mesafe hesabı
 değiştirilmeden önce yanlış bbox kaynaklı hatalar azaltılır. Özellikle dar
-zoom kayıtlarında alt kısımdaki bina/çatı/sahil parçalarının gemi olarak
-algılanması engellenmeye çalışılır.
+zoom kayıtlarında alt kısımdaki bina/çatı/sahil parçalarının ve termal
+görüntüde gemi parçası gibi görünen kenar yapılarının gemi olarak algılanması
+engellenmeye çalışılır.
 """
 
 from typing import TypeAlias, cast
@@ -46,8 +47,12 @@ YOLO_CONF_DEEP = 0.20
 YOLO_IMGSZ_FULL = 960
 YOLO_IMGSZ_DEEP = 1536
 
-THERMAL_YOLO_CONF_FULL = 0.34
-THERMAL_YOLO_CONF_DEEP = 0.20
+# Termal full-frame eşiği RGB'ye göre biraz daha düşük tutulur ama önceki
+# sürüme göre sertleştirildi. Dar FOV termalde gemi olmayan sıcak/soğuk
+# parçalar kolayca boat sanılabildiği için full-frame eşiği fazla düşük
+# olmamalıdır.
+THERMAL_YOLO_CONF_FULL = 0.40
+THERMAL_YOLO_CONF_DEEP = 0.24
 THERMAL_YOLO_IMGSZ_FULL = 1280
 THERMAL_YOLO_IMGSZ_DEEP = 1536
 
@@ -95,6 +100,21 @@ BOTTOM_STRUCTURE_Y1_RATIO = 0.62
 BOTTOM_STRUCTURE_WATER_RATIO = 0.76
 BOTTOM_STRUCTURE_AREA_RATIO = 0.012
 
+# Termal dar FOV görüntülerde ekran kenarında çıkan küçük/orta kutular çoğu
+# zaman gerçek gemi değil, yakın geminin/kıyı yapısının parçalarıdır. Gerçek
+# gemi ekrana kenardan giriyorsa birkaç frame sonra daha tam görüneceği için
+# ilk fragment kutularını elemek daha güvenlidir.
+THERMAL_EDGE_MARGIN_RATIO = 0.025
+THERMAL_EDGE_FRAGMENT_MAX_WIDTH_RATIO = 0.30
+THERMAL_EDGE_FRAGMENT_MAX_AREA_RATIO = 0.070
+THERMAL_EDGE_FRAGMENT_MAX_ASPECT = 4.2
+THERMAL_FRAGMENT_LOW_CONF = 0.78
+
+# Termal dar FOV'da full-frame kaynaklı düşük güvenli küçük parçalar false
+# positive üretmeye çok yatkındır.
+THERMAL_NARROW_FULL_MIN_CONF = 0.55
+THERMAL_NARROW_DEEP_MIN_CONF = 0.30
+
 
 def get_sensor_fov_h(sensor_info: SensorRow) -> float:
     """Sensör bilgisinden yatay FOV değerini güvenli şekilde okur.
@@ -111,6 +131,52 @@ def get_sensor_fov_h(sensor_info: SensorRow) -> float:
         return 65.7
 
 
+def get_sensor_fov_v(sensor_info: SensorRow) -> float:
+    """Sensör bilgisinden dikey FOV değerini güvenli şekilde okur.
+
+    Args:
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+
+    Returns:
+        Dikey FOV değeri. Okunamazsa geniş açı varsayımı döner.
+    """
+    try:
+        return float(sensor_info.get("fov_v", 39.9))
+    except (TypeError, ValueError):
+        return 39.9
+
+
+def get_sensor_zoom(sensor_info: SensorRow) -> float:
+    """Sensör bilgisinden zoom değerini güvenli şekilde okur.
+
+    Args:
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+
+    Returns:
+        Zoom değeri. Okunamazsa 0.0 döner.
+    """
+    try:
+        return float(sensor_info.get("zoom", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def is_narrow_fov(sensor_info: SensorRow) -> bool:
+    """Mevcut sensör bilgisinin dar FOV / zoomlu olup olmadığını kontrol eder.
+
+    Args:
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+
+    Returns:
+        FOV dar veya zoom yüksekse True.
+    """
+    fov_h = get_sensor_fov_h(sensor_info)
+    fov_v = get_sensor_fov_v(sensor_info)
+    zoom = get_sensor_zoom(sensor_info)
+
+    return fov_h < ZOOM_FOV_H_DEG or fov_v < 9.0 or zoom >= 0.85
+
+
 def get_class_name(model: object, cls_id: int) -> str:
     """YOLO modelindeki class id değerini okunabilir sınıf adına çevirir.
 
@@ -123,11 +189,9 @@ def get_class_name(model: object, cls_id: int) -> str:
     """
     names = model.names
 
-    # Ultralytics bazı modellerde class isimlerini dict olarak tutar.
     if isinstance(names, dict):
         return str(names.get(cls_id, str(cls_id)))
 
-    # Bazı modellerde class isimleri liste olarak gelir.
     if isinstance(names, list) and 0 <= cls_id < len(names):
         return str(names[cls_id])
 
@@ -135,24 +199,14 @@ def get_class_name(model: object, cls_id: int) -> str:
 
 
 def calculate_iou(box_a: Box, box_b: Box) -> float:
-    """İki bounding box arasındaki IoU değerini hesaplar.
-
-    Args:
-        box_a: İlk kutu. Format: x1, y1, x2, y2.
-        box_b: İkinci kutu. Format: x1, y1, x2, y2.
-
-    Returns:
-        Intersection over Union oranı.
-    """
+    """İki bounding box arasındaki IoU değerini hesaplar."""
     ax1, ay1, ax2, ay2 = box_a
     bx1, by1, bx2, by2 = box_b
 
-    # Kesişim alanının genişliği ve yüksekliği hesaplanır.
     inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
     inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
     inter_area = inter_w * inter_h
 
-    # Bölme hatasını önlemek için alanlar en az 1 kabul edilir.
     area_a = max(1.0, (ax2 - ax1) * (ay2 - ay1))
     area_b = max(1.0, (bx2 - bx1) * (by2 - by1))
 
@@ -160,18 +214,7 @@ def calculate_iou(box_a: Box, box_b: Box) -> float:
 
 
 def overlap_ratio_small_inside_large(box_a: Box, box_b: Box) -> float:
-    """Küçük kutunun büyük kutu içinde ne kadar kaldığını hesaplar.
-
-    Bu değer özellikle biri diğerinin içinde kalan detection kutularını
-    birleştirmek için kullanılır.
-
-    Args:
-        box_a: İlk kutu.
-        box_b: İkinci kutu.
-
-    Returns:
-        Kesişim alanının küçük kutu alanına oranı.
-    """
+    """Küçük kutunun büyük kutu içinde ne kadar kaldığını hesaplar."""
     ax1, ay1, ax2, ay2 = box_a
     bx1, by1, bx2, by2 = box_b
 
@@ -186,15 +229,7 @@ def overlap_ratio_small_inside_large(box_a: Box, box_b: Box) -> float:
 
 
 def horizontal_overlap_ratio(box_a: Box, box_b: Box) -> float:
-    """İki kutunun yatay eksende ne kadar örtüştüğünü hesaplar.
-
-    Args:
-        box_a: İlk kutu.
-        box_b: İkinci kutu.
-
-    Returns:
-        Yatay kesişim genişliğinin küçük kutu genişliğine oranı.
-    """
+    """İki kutunun yatay eksende ne kadar örtüştüğünü hesaplar."""
     ax1, _, ax2, _ = box_a
     bx1, _, bx2, _ = box_b
 
@@ -207,23 +242,13 @@ def horizontal_overlap_ratio(box_a: Box, box_b: Box) -> float:
 
 
 def vertical_gap_px(box_a: Box, box_b: Box) -> float:
-    """İki kutu arasındaki dikey boşluğu piksel cinsinden hesaplar.
-
-    Args:
-        box_a: İlk kutu.
-        box_b: İkinci kutu.
-
-    Returns:
-        Kutular dikeyde çakışıyorsa 0, aralarında boşluk varsa piksel değeri.
-    """
+    """İki kutu arasındaki dikey boşluğu piksel cinsinden hesaplar."""
     _, ay1, _, ay2 = box_a
     _, by1, _, by2 = box_b
 
-    # İlk kutu ikinci kutunun üstündeyse aradaki boşluk hesaplanır.
     if ay2 < by1:
         return by1 - ay2
 
-    # İkinci kutu ilk kutunun üstündeyse aradaki boşluk hesaplanır.
     if by2 < ay1:
         return ay1 - by2
 
@@ -231,15 +256,7 @@ def vertical_gap_px(box_a: Box, box_b: Box) -> float:
 
 
 def center_x_distance_ratio(box_a: Box, box_b: Box) -> float:
-    """İki kutu merkezinin yatay uzaklığını normalize eder.
-
-    Args:
-        box_a: İlk kutu.
-        box_b: İkinci kutu.
-
-    Returns:
-        Merkez x farkının büyük kutu genişliğine oranı.
-    """
+    """İki kutu merkezinin yatay uzaklığını normalize eder."""
     ax1, _, ax2, _ = box_a
     bx1, _, bx2, _ = box_b
 
@@ -253,28 +270,14 @@ def center_x_distance_ratio(box_a: Box, box_b: Box) -> float:
 
 
 def box_to_int(box: Box) -> IntBox:
-    """Float koordinatlı kutuyu integer koordinatlı kutuya çevirir.
-
-    Args:
-        box: Float koordinatlı bounding box.
-
-    Returns:
-        Yuvarlanmış integer bounding box.
-    """
+    """Float koordinatlı kutuyu integer koordinatlı kutuya çevirir."""
     x1, y1, x2, y2 = box
 
     return (int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2)))
 
 
 def visible_box(box: Box) -> IntBox:
-    """Bounding box koordinatlarını görüntü sınırlarına kırpar.
-
-    Args:
-        box: Görüntüye çizilecek bounding box.
-
-    Returns:
-        Görüntü sınırları içinde kalan integer bounding box.
-    """
+    """Bounding box koordinatlarını görüntü sınırlarına kırpar."""
     x1, y1, x2, y2 = box_to_int(box)
 
     return (
@@ -286,18 +289,9 @@ def visible_box(box: Box) -> IntBox:
 
 
 def clamp_track_box(box: Box) -> Box:
-    """Track kutusunu aşırı taşmalara karşı güvenli aralıkta tutar.
-
-    Args:
-        box: Track içinde tutulan bounding box.
-
-    Returns:
-        Genişletilmiş güvenli görüntü sınırlarına kırpılmış kutu.
-    """
+    """Track kutusunu aşırı taşmalara karşı güvenli aralıkta tutar."""
     x1, y1, x2, y2 = box
 
-    # Optical flow veya prediction sırasında kutu görüntü dışına taşabilir.
-    # Çok uzak taşmaları sınırlandırmak track'in kararsız büyümesini engeller.
     x1 = max(-2.0 * PROCESS_WIDTH, min(3.0 * PROCESS_WIDTH, x1))
     y1 = max(-2.0 * PROCESS_HEIGHT, min(3.0 * PROCESS_HEIGHT, y1))
     x2 = max(x1 + 2.0, min(3.0 * PROCESS_WIDTH, x2))
@@ -307,15 +301,7 @@ def clamp_track_box(box: Box) -> Box:
 
 
 def get_waterline_ratio(sensor_info: SensorRow) -> float:
-    """Bounding box içindeki su hattı oranını FOV değerine göre seçer.
-
-    Args:
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-
-    Returns:
-        Kutunun üstünden itibaren su hattı için kullanılacak oran.
-    """
-    # Dar FOV/zoom durumunda kutunun altına çok yaklaşmamak için oran azaltılır.
+    """Bounding box içindeki su hattı oranını FOV değerine göre seçer."""
     if get_sensor_fov_h(sensor_info) < ZOOM_FOV_H_DEG:
         return WATERLINE_RATIO_ZOOM
 
@@ -325,36 +311,18 @@ def get_waterline_ratio(sensor_info: SensorRow) -> float:
 def get_water_point_from_box(
     box: Box, sensor_info: SensorRow
 ) -> tuple[float, float]:
-    """Bounding box içinden mesafe hesabında kullanılacak su hattı noktasını alır.
-
-    Args:
-        box: Detection veya track kutusu.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-
-    Returns:
-        Su hattı noktasının x ve y koordinatları.
-    """
+    """Bounding box içinden mesafe hesabında kullanılacak su hattı noktasını alır."""
     x1, y1, x2, y2 = box
     height = max(1.0, y2 - y1)
 
-    # Su hattı x ekseninde kutunun merkezi kabul edilir.
     water_x = (x1 + x2) / 2.0
-
-    # y koordinatı FOV durumuna göre kutunun alt kısmına yakın seçilir.
     water_y = y1 + get_waterline_ratio(sensor_info) * height
 
     return water_x, water_y
 
 
 def is_own_ship_box(box: Box) -> bool:
-    """Detection kutusunun kameraya ait gemi parçası olup olmadığını kontrol eder.
-
-    Args:
-        box: Kontrol edilecek bounding box.
-
-    Returns:
-        Kutu kendi gemimize ait gibi görünüyorsa True.
-    """
+    """Detection kutusunun kameraya ait gemi parçası olup olmadığını kontrol eder."""
     x1, y1, x2, y2 = box
 
     width = max(1.0, x2 - x1)
@@ -362,20 +330,15 @@ def is_own_ship_box(box: Box) -> bool:
     area = width * height
     frame_area = PROCESS_WIDTH * PROCESS_HEIGHT
 
-    # Görüntünün altına yapışık ve yüksek kutular genellikle kendi gemi
-    # gövdesinden veya kameraya çok yakın parçalardan kaynaklanır.
     if (
         y2 >= PROCESS_HEIGHT * OWN_SHIP_BOTTOM_RATIO
         and height >= PROCESS_HEIGHT * OWN_SHIP_MIN_HEIGHT_RATIO
     ):
         return True
 
-    # Aşırı büyük kutular gerçek uzak hedef yerine görüntüdeki yakın objeleri
-    # temsil ediyor olabilir.
     if area >= frame_area * OWN_SHIP_MAX_AREA_RATIO:
         return True
 
-    # Alt sınırda geniş ve yüksek görünen kutular ayrıca elenir.
     if (
         y2 >= PROCESS_HEIGHT * 0.97
         and height >= PROCESS_HEIGHT * 0.18
@@ -387,17 +350,7 @@ def is_own_ship_box(box: Box) -> bool:
 
 
 def max_search_depth_below_horizon(sensor_info: SensorRow, mode: str) -> int:
-    """YOLO aramasının ufuk altında ne kadar derine ineceğini belirler.
-
-    Args:
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        mode: Detection çalışma modu.
-
-    Returns:
-        Ufuk çizgisinin altında aranacak maksimum piksel derinliği.
-    """
-    # bottom_deep özellikle yakın/alt hedefler için kullanılıyorsa eski davranışa
-    # daha yakın tutulur.
+    """YOLO aramasının ufuk altında ne kadar derine ineceğini belirler."""
     if mode == "bottom_deep":
         return PROCESS_HEIGHT
 
@@ -416,14 +369,7 @@ def max_search_depth_below_horizon(sensor_info: SensorRow, mode: str) -> int:
 
 
 def max_valid_depth_below_horizon(sensor_info: SensorRow) -> int:
-    """Detection su hattı için izin verilen maksimum ufuk altı derinliği.
-
-    Args:
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-
-    Returns:
-        Ufuk çizgisinin altında geçerli kabul edilen maksimum piksel derinliği.
-    """
+    """Detection su hattı için izin verilen maksimum ufuk altı derinliği."""
     fov_h = get_sensor_fov_h(sensor_info)
 
     if fov_h < STRONG_ZOOM_FOV_H_DEG:
@@ -441,16 +387,7 @@ def max_valid_depth_below_horizon(sensor_info: SensorRow) -> int:
 def is_probable_bottom_structure(
     det: Detection, sensor_info: SensorRow, horizon_state: HorizonState
 ) -> bool:
-    """RGB görüntüde bina/çatı/sahil parçası olabilecek kutuları ayıklar.
-
-    Args:
-        det: Kontrol edilecek detection.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-
-    Returns:
-        Kutu alt bölge yapısı gibi görünüyorsa True.
-    """
+    """RGB görüntüde bina/çatı/sahil parçası olabilecek kutuları ayıklar."""
     if det.get("channel") == "thermal":
         return False
 
@@ -466,8 +403,6 @@ def is_probable_bottom_structure(
     y_horizon = horizon_y_at(horizon_state, float(det["water_x"]))
     depth_below_horizon = water_y - y_horizon
 
-    # Dar zoom görüntülerde gemiler çoğunlukla ufuk çevresindeki deniz bandında
-    # beklenir. Çok aşağıdaki kutular sahil/bina/çatı false positive olabilir.
     if (
         get_sensor_fov_h(sensor_info) < ZOOM_FOV_H_DEG
         and y1 > PROCESS_HEIGHT * BOTTOM_STRUCTURE_Y1_RATIO
@@ -475,8 +410,6 @@ def is_probable_bottom_structure(
     ):
         return True
 
-    # Alt kısımda, belirgin alan kaplayan ve gemi gövdesi oranına uymayan
-    # kutular liman yapısı gibi davranır.
     if (
         y1 > PROCESS_HEIGHT * BOTTOM_STRUCTURE_Y1_RATIO
         and area_ratio > BOTTOM_STRUCTURE_AREA_RATIO
@@ -484,13 +417,108 @@ def is_probable_bottom_structure(
     ):
         return True
 
-    # Ufuk çizgisinden çok aşağıda kalan kutular yakın obje/sahil yapısı olabilir.
     if depth_below_horizon > max_valid_depth_below_horizon(sensor_info):
         return True
 
-    # Görüntünün en altına yaklaşan büyük RGB kutular gerçek uzak gemiden çok
-    # sahil parçası veya kendi platform objesi olma eğilimindedir.
     if y2 > PROCESS_HEIGHT * 0.92 and area_ratio > 0.018:
+        return True
+
+    return False
+
+
+def is_thermal_edge_fragment(
+    det: Detection, sensor_info: SensorRow
+) -> bool:
+    """Dar FOV termalde ekran kenarındaki parça kutuları ayıklar.
+
+    Args:
+        det: Kontrol edilecek detection.
+        sensor_info: Mevcut frame'e ait sensör bilgisi.
+
+    Returns:
+        Detection yakın gemi/yapı parçası gibi görünüyorsa True.
+    """
+    if det.get("channel") != "thermal":
+        return False
+
+    if not is_narrow_fov(sensor_info):
+        return False
+
+    box = cast(Box, det["box"])
+    x1, y1, x2, y2 = box
+
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    aspect = width / max(height, 1.0)
+    area_ratio = (width * height) / float(PROCESS_WIDTH * PROCESS_HEIGHT)
+    width_ratio = width / PROCESS_WIDTH
+    conf = float(det.get("conf", 0.0))
+    source = str(det.get("source", ""))
+
+    left_edge = x1 <= PROCESS_WIDTH * THERMAL_EDGE_MARGIN_RATIO
+    right_edge = x2 >= PROCESS_WIDTH * (1.0 - THERMAL_EDGE_MARGIN_RATIO)
+    touches_side = left_edge or right_edge
+
+    if not touches_side:
+        return False
+
+    # Çok büyük ana gemi kutularını değil, kenarda görünen küçük/orta parçaları
+    # hedefliyoruz.
+    if (
+        width_ratio <= THERMAL_EDGE_FRAGMENT_MAX_WIDTH_RATIO
+        and area_ratio <= THERMAL_EDGE_FRAGMENT_MAX_AREA_RATIO
+        and aspect <= THERMAL_EDGE_FRAGMENT_MAX_ASPECT
+    ):
+        return True
+
+    # Full-frame kaynaklı ve yüksek güvenli olmayan kenar kutuları da risklidir.
+    if source == "full" and conf < THERMAL_FRAGMENT_LOW_CONF:
+        return True
+
+    # Kenara yapışık, alt/orta bölgede ve dikey-kompakt görünen kutular termal
+    # yapısal parçalar olabilir.
+    if (
+        y1 > PROCESS_HEIGHT * 0.25
+        and width_ratio <= 0.36
+        and area_ratio <= 0.090
+        and aspect <= 3.2
+    ):
+        return True
+
+    return False
+
+
+def is_thermal_low_quality_fragment(
+    det: Detection, sensor_info: SensorRow
+) -> bool:
+    """Dar FOV termalde düşük güvenli küçük parça detectionlarını ayıklar."""
+    if det.get("channel") != "thermal":
+        return False
+
+    if not is_narrow_fov(sensor_info):
+        return False
+
+    box = cast(Box, det["box"])
+    x1, y1, x2, y2 = box
+
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    area_ratio = (width * height) / float(PROCESS_WIDTH * PROCESS_HEIGHT)
+    width_ratio = width / PROCESS_WIDTH
+    conf = float(det.get("conf", 0.0))
+    source = str(det.get("source", ""))
+
+    if source == "full" and conf < THERMAL_NARROW_FULL_MIN_CONF:
+        return True
+
+    if source != "full" and conf < THERMAL_NARROW_DEEP_MIN_CONF:
+        return True
+
+    if (
+        area_ratio < 0.012
+        and width_ratio < 0.22
+        and conf < THERMAL_FRAGMENT_LOW_CONF
+    ):
         return True
 
     return False
@@ -499,16 +527,7 @@ def is_probable_bottom_structure(
 def filter_detection(
     det: Detection, sensor_info: SensorRow, horizon_state: HorizonState
 ) -> bool:
-    """Ham detection sonucunu geometri ve boyut kurallarına göre filtreler.
-
-    Args:
-        det: YOLO veya termal blob tarafından üretilen detection sözlüğü.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-
-    Returns:
-        Detection kullanılabilir ise True, elenmesi gerekiyorsa False.
-    """
+    """Ham detection sonucunu geometri ve boyut kurallarına göre filtreler."""
     box = cast(Box, det["box"])
     x1, y1, x2, y2 = box
 
@@ -519,8 +538,6 @@ def filter_detection(
     is_thermal = det.get("channel") == "thermal"
     fov_h = get_sensor_fov_h(sensor_info)
 
-    # Termal görüntüde küçük sıcak hedefler görülebileceği için minimum boyut
-    # RGB'ye göre farklı tutulur.
     if is_thermal:
         min_width = 14
         min_height = 8
@@ -531,13 +548,11 @@ def filter_detection(
     if width < min_width or height < min_height:
         return False
 
-    # FOV daraldıkça aynı hedef görüntüde daha büyük görünür. Bu yüzden alan
-    # eşiği FOV'a göre değiştirilir.
     if is_thermal:
         if fov_h < ZOOM_FOV_H_DEG:
-            min_area = 70
+            min_area = 95
         elif fov_h < MID_FOV_H_DEG:
-            min_area = 110
+            min_area = 130
         else:
             min_area = 180
     elif fov_h < STRONG_ZOOM_FOV_H_DEG:
@@ -552,8 +567,6 @@ def filter_detection(
     if area < min_area:
         return False
 
-    # Çok büyük kutular genellikle yanlış detection veya kameraya çok yakın
-    # objelerden gelir.
     if area > frame_area * 0.45:
         return False
 
@@ -562,10 +575,19 @@ def filter_detection(
     if is_thermal:
         if aspect < 0.45 or aspect > 16.0:
             return False
+
         if y1 > PROCESS_HEIGHT * 0.82:
             return False
+
         if float(det["water_y"]) > PROCESS_HEIGHT * 0.94:
             return False
+
+        if is_thermal_edge_fragment(det, sensor_info):
+            return False
+
+        if is_thermal_low_quality_fragment(det, sensor_info):
+            return False
+
         if (
             str(det.get("source", "")).startswith("thermal_blob")
             and area < THERMAL_BLOB_MIN_AREA
@@ -575,7 +597,6 @@ def filter_detection(
         if aspect < 0.35 or aspect > 16.0:
             return False
 
-        # Dar zoomda çok dikey kutular genellikle bina/çatı parçası olur.
         if fov_h < ZOOM_FOV_H_DEG and aspect < 0.55:
             return False
 
@@ -584,8 +605,6 @@ def filter_detection(
 
     y_horizon = horizon_y_at(horizon_state, float(det["water_x"]))
 
-    # Su hattı ufuk çizgisinin üstünde veya tam üstündeyse fiziksel mesafe
-    # hesabı güvenilir değildir.
     if float(det["water_y"]) <= y_horizon + 0.5:
         return False
 
@@ -599,7 +618,6 @@ def filter_detection(
         horizon_state,
     )
 
-    # Çok yakın ve görüntünün altına yakın kutular kendi gemimize ait olabilir.
     if (
         result["valid"]
         and float(result["distance"]) < OWN_SHIP_NEAR_DISTANCE_M
@@ -613,21 +631,10 @@ def filter_detection(
 def build_search_regions(
     sensor_info: SensorRow, horizon_state: HorizonState, mode: str
 ) -> list[Region]:
-    """YOLO'nun çalışacağı görüntü bölgelerini üretir.
-
-    Args:
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        mode: Detection çalışma modu.
-
-    Returns:
-        Region adı ve koordinatlarından oluşan arama bölgesi listesi.
-    """
+    """YOLO'nun çalışacağı görüntü bölgelerini üretir."""
     y_h = int(max(10, min(PROCESS_HEIGHT - 40, float(horizon_state["y"]))))
     fov_h = get_sensor_fov_h(sensor_info)
 
-    # Full frame ilk arama bölgesi olarak korunur. Ancak filter_detection içinde
-    # full frame kaynaklı alt bölge false positive'leri daha sert elenir.
     regions: list[Region] = [("full", 0, 0, PROCESS_WIDTH, PROCESS_HEIGHT)]
 
     if mode == "full_only":
@@ -636,7 +643,6 @@ def build_search_regions(
     search_depth = max_search_depth_below_horizon(sensor_info, mode)
     y_bottom = min(PROCESS_HEIGHT, y_h + search_depth)
 
-    # Ufuk çevresi küçük ve uzak hedefler için en önemli bölgedir.
     regions.append(
         (
             "horizon_strip",
@@ -647,13 +653,9 @@ def build_search_regions(
         )
     )
 
-    # Dar zoomda aramayı alt bina/çatı bölgesine kadar indirmiyoruz. Böylece
-    # sahil yapılarının YOLO tarafından boat sanılma ihtimali azalır.
     regions.append(("sea_band", 0, max(0, y_h - 30), PROCESS_WIDTH, y_bottom))
 
     if mode == "bottom_deep":
-        # Alt bölgeler sadece özel modda eklenir. Bu mod yakın hedefleri
-        # yakalamak için var; normal zoomed testte ana kaynak olmamalıdır.
         regions.extend(
             [
                 (
@@ -673,8 +675,6 @@ def build_search_regions(
             ]
         )
 
-    # Dar FOV'da daha küçük yatay tile kullanılır. Böylece uzak hedefler crop
-    # içinde daha büyük görünür ve küçük tekne yakalama şansı artar.
     if fov_h < STRONG_ZOOM_FOV_H_DEG:
         tile_w = 420
         step = 260
@@ -690,7 +690,6 @@ def build_search_regions(
 
     x_value = 0
 
-    # Görüntü yatayda kayan tile'lara bölünür.
     while x_value < PROCESS_WIDTH:
         x2 = min(PROCESS_WIDTH, x_value + tile_w)
         x1 = max(0, x2 - tile_w)
@@ -706,20 +705,10 @@ def build_search_regions(
 
 
 def prepare_frame_for_detection(frame: np.ndarray, channel: str) -> np.ndarray:
-    """Detection öncesi frame'i kanal tipine göre hazırlar.
-
-    Args:
-        frame: Ham BGR frame.
-        channel: RGB veya termal kanal adı.
-
-    Returns:
-        Detection için hazırlanmış BGR frame.
-    """
+    """Detection öncesi frame'i kanal tipine göre hazırlar."""
     if channel != "thermal":
         return frame
 
-    # Termal görüntüde kontrast artırılarak sıcak/soğuk hedeflerin YOLO için
-    # daha belirgin hale gelmesi sağlanır.
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
     clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
@@ -730,19 +719,10 @@ def prepare_frame_for_detection(frame: np.ndarray, channel: str) -> np.ndarray:
 
 
 def create_thermal_candidate_mask(crop_gray: np.ndarray) -> np.ndarray | None:
-    """Termal crop içinde sıcak/soğuk aday bölgeler için maske üretir.
-
-    Args:
-        crop_gray: Gri seviye termal crop görüntüsü.
-
-    Returns:
-        Aday maskesi veya kontrast yetersizse None.
-    """
+    """Termal crop içinde sıcak/soğuk aday bölgeler için maske üretir."""
     if crop_gray.size == 0:
         return None
 
-    # Termal crop normalize edilerek farklı kontrast seviyelerine dayanıklı
-    # hale getirilir.
     gray = cv2.normalize(crop_gray, None, 0, 255, cv2.NORM_MINMAX)
     gray = gray.astype(np.uint8)
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -761,8 +741,6 @@ def create_thermal_candidate_mask(crop_gray: np.ndarray) -> np.ndarray | None:
     bright = (eq >= high_threshold).astype(np.uint8) * 255
     dark = (eq <= low_threshold).astype(np.uint8) * 255
 
-    # Şu an maske olarak parlak bölgeler kullanılıyor. Dark maske hesaplaması
-    # korunur; ileride soğuk hedef adayları için tekrar kullanılabilir.
     _ = dark
 
     if std_value < THERMAL_BLOB_MIN_CONTRAST:
@@ -770,8 +748,6 @@ def create_thermal_candidate_mask(crop_gray: np.ndarray) -> np.ndarray | None:
 
     mask = bright
 
-    # Küçük gürültüler açma işlemiyle temizlenir, parçalı hedefler kapama
-    # işlemiyle birleştirilir.
     kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5))
 
@@ -787,17 +763,7 @@ def detect_thermal_blobs(
     horizon_state: HorizonState,
     mode: str,
 ) -> list[Detection]:
-    """YOLO sonuç yoksa termal görüntüden blob tabanlı aday detection üretir.
-
-    Args:
-        frame: Termal BGR frame.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        mode: Detection çalışma modu.
-
-    Returns:
-        Termal blob adaylarından üretilen detection listesi.
-    """
+    """YOLO sonuç yoksa termal görüntüden blob tabanlı aday detection üretir."""
     if not THERMAL_BLOB_DETECTION_ENABLED:
         return []
 
@@ -808,7 +774,6 @@ def detect_thermal_blobs(
     for region in regions:
         region_name, x1, y1, x2, y2 = region
 
-        # Full frame yerine daha kontrollü alt/ufuk bölgeleri kullanılır.
         if region_name == "full":
             continue
 
@@ -848,8 +813,6 @@ def detect_thermal_blobs(
             ):
                 continue
 
-            # Blob kutusu küçük bir pad ile genişletilir. Böylece hedefin sıcak
-            # çekirdeği yerine tüm gövdeye daha yakın bir kutu elde edilir.
             pad_x = max(4, int(bw * 0.10))
             pad_y = max(3, int(bh * 0.12))
 
@@ -892,28 +855,29 @@ def detect_thermal_blobs(
 
 
 def region_confidence(
-    region_name: str, base_full_conf: float, base_deep_conf: float
+    region_name: str,
+    base_full_conf: float,
+    base_deep_conf: float,
+    channel: str,
+    sensor_info: SensorRow,
 ) -> float:
-    """Region adına göre YOLO confidence eşiğini seçer.
-
-    Args:
-        region_name: Detection region adı.
-        base_full_conf: Full frame için confidence eşiği.
-        base_deep_conf: Crop/tile bölgeleri için confidence eşiği.
-
-    Returns:
-        Region için kullanılacak confidence değeri.
-    """
+    """Region adına göre YOLO confidence eşiğini seçer."""
     if region_name == "full":
-        return base_full_conf
+        conf = base_full_conf
+    elif region_name in {"horizon_strip", "sea_band"}:
+        conf = base_deep_conf
+    elif region_name.startswith("tile_"):
+        conf = base_deep_conf
+    else:
+        conf = base_full_conf
 
-    if region_name in {"horizon_strip", "sea_band"}:
-        return base_deep_conf
+    if channel == "thermal" and is_narrow_fov(sensor_info):
+        if region_name == "full":
+            return max(conf, THERMAL_NARROW_FULL_MIN_CONF)
 
-    if region_name.startswith("tile_"):
-        return base_deep_conf
+        return max(conf, THERMAL_NARROW_DEEP_MIN_CONF)
 
-    return base_full_conf
+    return conf
 
 
 def run_yolo_region(
@@ -926,21 +890,7 @@ def run_yolo_region(
     imgsz: int,
     channel: str = "rgb",
 ) -> list[Detection]:
-    """Tek bir region üzerinde YOLO inference çalıştırır.
-
-    Args:
-        frame: Detection yapılacak BGR frame.
-        model: Ultralytics YOLO model nesnesi.
-        region: Modelin çalışacağı bölge.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        conf_thres: YOLO confidence eşiği.
-        imgsz: YOLO inference görüntü boyutu.
-        channel: RGB veya termal kanal adı.
-
-    Returns:
-        Filtrelerden geçmiş detection listesi.
-    """
+    """Tek bir region üzerinde YOLO inference çalıştırır."""
     region_name, x1, y1, x2, y2 = region
     crop = frame[y1:y2, x1:x2]
 
@@ -949,7 +899,6 @@ def run_yolo_region(
 
     detections: list[Detection] = []
 
-    # YOLO yalnızca boat class id'si için çalıştırılır.
     results = model.predict(
         crop,
         conf=conf_thres,
@@ -957,7 +906,7 @@ def run_yolo_region(
         iou=YOLO_IOU_THRES,
         verbose=False,
         classes=[8],
-        max_det=25 if channel == "thermal" else 60,
+        max_det=18 if channel == "thermal" else 60,
         device=YOLO_DEVICE,
         half=YOLO_HALF,
     )
@@ -976,7 +925,6 @@ def run_yolo_region(
 
             bx1, by1, bx2, by2 = box.xyxy[0].cpu().numpy()
 
-            # Crop koordinatları full frame koordinatına çevrilir.
             abs_box = (
                 float(max(0, bx1 + x1)),
                 float(max(0, by1 + y1)),
@@ -1002,27 +950,16 @@ def run_yolo_region(
 
 
 def detection_quality_score(det: Detection) -> float:
-    """Detection kutusunun birleştirme sırasındaki kalite skorunu hesaplar.
-
-    Args:
-        det: Skorlanacak detection.
-
-    Returns:
-        Confidence, alan ve su hattı konumundan oluşan kalite skoru.
-    """
+    """Detection kutusunun birleştirme sırasındaki kalite skorunu hesaplar."""
     x1, y1, x2, y2 = cast(Box, det["box"])
 
     width = max(1.0, x2 - x1)
     height = max(1.0, y2 - y1)
     area = width * height
 
-    # Confidence en güçlü katkıdır; alan ve y konumu yardımcı skor olarak
-    # kullanılır.
     area_score = min(area / (PROCESS_WIDTH * PROCESS_HEIGHT), 0.35)
     water_score = float(det["water_y"]) / PROCESS_HEIGHT
 
-    # Horizon/tile kaynaklı detection'lara küçük avantaj verilir. Uzak hedefler
-    # çoğunlukla bu bölgelerden daha doğru yakalanır.
     source = str(det.get("source", ""))
     region_bonus = 0.0
 
@@ -1042,15 +979,7 @@ def detection_quality_score(det: Detection) -> float:
 
 
 def same_vessel(det_a: Detection, det_b: Detection) -> bool:
-    """İki detection'ın aynı gemiye ait olup olmadığını kontrol eder.
-
-    Args:
-        det_a: İlk detection.
-        det_b: İkinci detection.
-
-    Returns:
-        Detection'lar aynı hedefe ait görünüyorsa True.
-    """
+    """İki detection'ın aynı gemiye ait olup olmadığını kontrol eder."""
     box_a = cast(Box, det_a["box"])
     box_b = cast(Box, det_b["box"])
 
@@ -1060,8 +989,6 @@ def same_vessel(det_a: Detection, det_b: Detection) -> bool:
     if overlap_ratio_small_inside_large(box_a, box_b) > MERGE_INSIDE_THRES:
         return True
 
-    # IoU düşük olsa bile yatay örtüşme ve küçük dikey boşluk aynı gemi için
-    # yeterli sinyal olabilir.
     if (
         horizontal_overlap_ratio(box_a, box_b)
         >= MERGE_HORIZONTAL_OVERLAP_THRES
@@ -1077,23 +1004,13 @@ def same_vessel(det_a: Detection, det_b: Detection) -> bool:
 def merge_detection_group(
     group: list[Detection], sensor_info: SensorRow
 ) -> Detection:
-    """Aynı hedefe ait detection grubunu tek detection'a indirger.
-
-    Args:
-        group: Aynı hedefe ait olduğu düşünülen detection listesi.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-
-    Returns:
-        Gruptaki en kaliteli kutuyu temel alan birleştirilmiş detection.
-    """
+    """Aynı hedefe ait detection grubunu tek detection'a indirger."""
     main_det = max(group, key=detection_quality_score)
 
     water_x, water_y = get_water_point_from_box(
         cast(Box, main_det["box"]), sensor_info
     )
 
-    # Orijinal davranış korunur: box ve source en kaliteli detection'dan,
-    # confidence ise gruptaki en yüksek değerden alınır.
     return {
         "box": main_det["box"],
         "conf": max(float(det["conf"]) for det in group),
@@ -1107,15 +1024,7 @@ def merge_detection_group(
 def merge_same_vessel_detections(
     detections: list[Detection], sensor_info: SensorRow
 ) -> list[Detection]:
-    """Aynı gemiye ait tekrar detection kutularını birleştirir.
-
-    Args:
-        detections: Filtrelenmiş ham detection listesi.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-
-    Returns:
-        Aynı hedef tekrarları temizlenmiş detection listesi.
-    """
+    """Aynı gemiye ait tekrar detection kutularını birleştirir."""
     detections = sorted(detections, key=detection_quality_score, reverse=True)
 
     groups: list[list[Detection]] = []
@@ -1123,7 +1032,6 @@ def merge_same_vessel_detections(
     for det in detections:
         placed = False
 
-        # Detection mevcut gruplardan biriyle aynı gemiye aitse o gruba eklenir.
         for group in groups:
             if any(same_vessel(det, other) for other in group):
                 group.append(det)
@@ -1140,7 +1048,6 @@ def merge_same_vessel_detections(
     kept: list[Detection] = []
 
     for det in merged:
-        # İkinci geçişte merge sonrası hâlâ çakışan kutular varsa ayıklanır.
         if not any(same_vessel(det, kept_det) for kept_det in kept):
             kept.append(det)
 
@@ -1155,19 +1062,7 @@ def detect_boats(
     mode: str,
     channel: str = "rgb",
 ) -> list[Detection]:
-    """RGB veya termal frame üzerinde tekne detection akışını çalıştırır.
-
-    Args:
-        frame: İşlenecek BGR frame.
-        model: Ultralytics YOLO model nesnesi.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        mode: Detection çalışma modu.
-        channel: RGB veya termal kanal adı.
-
-    Returns:
-        Birleştirilmiş ve filtrelenmiş tekne detection listesi.
-    """
+    """RGB veya termal frame üzerinde tekne detection akışını çalıştırır."""
     is_thermal = channel == "thermal"
     fov_h = get_sensor_fov_h(sensor_info)
 
@@ -1193,11 +1088,11 @@ def detect_boats(
     regions = build_search_regions(sensor_info, horizon_state, mode)
     detections: list[Detection] = []
 
-    # İlk geçişte region'a göre confidence seçilir. Full frame daha sert,
-    # horizon/tile bölgeleri küçük hedefler için daha esnek çalışır.
     for region in regions:
         region_name = region[0]
-        conf = region_confidence(region_name, conf_full, conf_deep)
+        conf = region_confidence(
+            region_name, conf_full, conf_deep, channel, sensor_info
+        )
 
         detections.extend(
             run_yolo_region(
@@ -1212,16 +1107,18 @@ def detect_boats(
             )
         )
 
-    # Termal akışta YOLO sonuç üretmezse opsiyonel blob tabanlı fallback denenir.
     if is_thermal and not detections:
         detections.extend(
             detect_thermal_blobs(frame, sensor_info, horizon_state, mode)
         )
 
-    # Deep modlarda ilk geçiş sonuç üretmezse daha düşük confidence eşiğiyle
-    # tekrar arama yapılır.
     if not detections and mode in ("deep", "bottom_deep"):
         for region in regions:
+            region_name = region[0]
+            conf = region_confidence(
+                region_name, conf_full, conf_deep, channel, sensor_info
+            )
+
             detections.extend(
                 run_yolo_region(
                     detection_frame,
@@ -1229,7 +1126,7 @@ def detect_boats(
                     region,
                     sensor_info,
                     horizon_state,
-                    conf_deep,
+                    conf,
                     imgsz,
                     channel=channel,
                 )
@@ -1242,9 +1139,7 @@ def detect_boats(
 
     merged = merge_same_vessel_detections(detections, sensor_info)
 
-    # Termal görüntüde false positive riskini azaltmak için en iyi 10 sonuç
-    # tutulur.
     if is_thermal:
-        merged = sorted(merged, key=detection_quality_score, reverse=True)[:10]
+        merged = sorted(merged, key=detection_quality_score, reverse=True)[:6]
 
     return merged
