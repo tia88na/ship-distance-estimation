@@ -695,9 +695,7 @@ def weighted_log_average(
 
 
 def apply_narrow_fov_size_penalty(
-    size_result: dict[str, Any],
-    box: Box,
-    sensor_info: dict[str, Any],
+    size_result: dict[str, Any], box: Box, sensor_info: dict[str, Any]
 ) -> dict[str, Any]:
     """Dar FOV / zoomlu görüntülerde bbox-size güvenini düşürür.
 
@@ -979,9 +977,7 @@ def estimate_hybrid_distance_from_box(
     )
 
     size_result = estimate_distance_from_bbox_size(box, sensor_info)
-    size_result = apply_narrow_fov_size_penalty(
-        size_result, box, sensor_info
-    )
+    size_result = apply_narrow_fov_size_penalty(size_result, box, sensor_info)
 
     return fuse_horizon_and_size_distance(
         horizon_result, size_result, sensor_info
