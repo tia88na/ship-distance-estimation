@@ -174,10 +174,18 @@ class DistanceAPI:
         if size_min_distance_m < 0.0:
             raise ValueError("size_min_distance_m negatif olamaz.")
 
+        if size_max_distance_m <= 0.0:
+            raise ValueError("size_max_distance_m sıfırdan büyük olmalıdır.")
+
         if size_min_distance_m >= size_max_distance_m:
             raise ValueError(
                 "size_min_distance_m, size_max_distance_m değerinden "
                 "küçük olmalıdır."
+            )
+
+        if size_min_distance_m >= max_distance_m:
+            raise ValueError(
+                "size_min_distance_m, max_distance_m değerinden küçük olmalıdır."
             )
 
         if default_ship_length_m <= 0.0:
