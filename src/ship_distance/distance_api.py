@@ -205,9 +205,7 @@ class DistanceAPI:
         )
 
     @staticmethod
-    def get_water_point(
-        distance_input: DistanceInput,
-    ) -> tuple[float, float]:
+    def get_water_point(distance_input: DistanceInput) -> tuple[float, float]:
         """Mesafe hesabı için bbox içindeki yaklaşık su hattı noktasını seçer."""
         x1, y1, x2, y2 = DistanceAPI.bbox_to_xyxy(distance_input)
 
@@ -230,8 +228,7 @@ class DistanceAPI:
         return water_x, water_y
 
     def validate_input(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> str | None:
         """API girdilerinin kullanılabilir olup olmadığını kontrol eder."""
         if distance_input.image_width <= 0:
@@ -255,8 +252,7 @@ class DistanceAPI:
         return None
 
     def calculate_horizontal_line_distance(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> tuple[float | None, float, str]:
         """Horizontal-line ve kamera açılarıyla yaklaşık mesafe hesaplar.
 
@@ -276,6 +272,7 @@ class DistanceAPI:
             distance_input.image_height,
         )
 
+        # Alperen'in mevcut hesaplama yapısındaki açı düzeni korunur.
         alpha_base = (
             distance_input.tilt_deg
             - distance_input.fov_v_deg / 2.0
@@ -310,6 +307,8 @@ class DistanceAPI:
         if not self.min_distance_m <= distance <= self.max_distance_m:
             return None, 0.0, "horizontal_distance_out_of_range"
 
+        # Dar FOV'da birkaç piksel su hattı farkı büyük mesafe değişimi
+        # oluşturabildiği için güven düşürülür.
         if distance_input.fov_h_deg < 5.0:
             confidence = 0.20
         elif distance_input.fov_h_deg < 15.0:
@@ -323,15 +322,10 @@ class DistanceAPI:
         if abs(distance_input.pitch_deg) > 10.0:
             confidence *= 0.85
 
-        return (
-            distance,
-            self.clamp(confidence, 0.05, 0.60),
-            "horizontal_ok",
-        )
+        return (distance, self.clamp(confidence, 0.05, 0.60), "horizontal_ok")
 
     def calculate_butterfly_distance(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> tuple[float | None, float, str]:
         """BBox-size ve FOV kullanarak kelebek geometrisi mesafesi hesaplar.
 
@@ -354,25 +348,13 @@ class DistanceAPI:
         side_score = self.clamp((aspect_ratio - 1.2) / 2.8, 0.0, 1.0)
         bow_score = self.clamp((1.8 - aspect_ratio) / 1.2, 0.0, 1.0)
 
-        width_confidence = self.clamp(
-            0.10 + 0.75 * side_score,
-            0.10,
-            0.85,
-        )
+        width_confidence = self.clamp(0.10 + 0.75 * side_score, 0.10, 0.85)
 
-        height_confidence = self.clamp(
-            0.25 + 0.35 * bow_score,
-            0.20,
-            0.60,
-        )
+        height_confidence = self.clamp(0.25 + 0.35 * bow_score, 0.20, 0.60)
 
-        width_distance = (
-            self.default_ship_length_m * fx / distance_input.w
-        )
+        width_distance = self.default_ship_length_m * fx / distance_input.w
 
-        height_distance = (
-            self.default_ship_height_m * fy / distance_input.h
-        )
+        height_distance = self.default_ship_height_m * fy / distance_input.h
 
         total_weight = width_confidence + height_confidence
 
@@ -387,18 +369,13 @@ class DistanceAPI:
         if not self.min_distance_m <= distance <= self.max_distance_m:
             return None, 0.0, "butterfly_distance_out_of_range"
 
-        bbox_area_ratio = (
-            distance_input.w * distance_input.h
-        ) / float(distance_input.image_width * distance_input.image_height)
+        bbox_area_ratio = (distance_input.w * distance_input.h) / float(
+            distance_input.image_width * distance_input.image_height
+        )
 
         bbox_score = self.clamp(
             0.30
-            + 0.70
-            * self.clamp(
-                (bbox_area_ratio - 0.00012) / 0.014,
-                0.0,
-                1.0,
-            ),
+            + 0.70 * self.clamp((bbox_area_ratio - 0.00012) / 0.014, 0.0, 1.0),
             0.05,
             1.0,
         )
@@ -414,6 +391,8 @@ class DistanceAPI:
         )
 
         if is_narrow_fov:
+            # Dar FOV'da bbox geminin tamamı yerine yalnızca bir bölümünü
+            # kapsayabilir. Bu nedenle kelebek geometrisi güveni azaltılır.
             confidence *= 0.60
 
         x1, y1, x2, y2 = self.bbox_to_xyxy(distance_input)
@@ -428,11 +407,7 @@ class DistanceAPI:
         if touches_edge:
             confidence *= 0.60
 
-        return (
-            distance,
-            self.clamp(confidence, 0.03, 0.95),
-            "butterfly_ok",
-        )
+        return (distance, self.clamp(confidence, 0.03, 0.95), "butterfly_ok")
 
     @staticmethod
     def weighted_log_average(
@@ -471,21 +446,18 @@ class DistanceAPI:
             )
 
         if horizontal_distance is None and butterfly_distance is not None:
-            return (
-                butterfly_distance,
-                butterfly_confidence,
-                "butterfly_only",
-            )
+            return (butterfly_distance, butterfly_confidence, "butterfly_only")
 
         assert horizontal_distance is not None
         assert butterfly_distance is not None
 
         ratio = max(horizontal_distance, butterfly_distance) / max(
-            min(horizontal_distance, butterfly_distance),
-            1.0,
+            min(horizontal_distance, butterfly_distance), 1.0
         )
 
         if ratio > 2.2:
+            # İki yöntem çok ayrışıyorsa güven skoruna göre daha güçlü yöntem
+            # baskın tutulur; ikisinin kör şekilde ortalaması alınmaz.
             if butterfly_confidence >= 0.55:
                 horizontal_weight = 0.25
                 butterfly_weight = 0.75
@@ -523,8 +495,7 @@ class DistanceAPI:
         return final_distance, final_confidence, reason
 
     def calc_distance(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> DistanceOutput:
         """Tek detection için bütün mesafe hesaplarını çalıştırır."""
         validation_error = self.validate_input(distance_input)
@@ -542,17 +513,13 @@ class DistanceAPI:
                 reason=validation_error,
             )
 
-        (
-            horizontal_distance,
-            horizontal_confidence,
-            horizontal_reason,
-        ) = self.calculate_horizontal_line_distance(distance_input)
+        (horizontal_distance, horizontal_confidence, horizontal_reason) = (
+            self.calculate_horizontal_line_distance(distance_input)
+        )
 
-        (
-            butterfly_distance,
-            butterfly_confidence,
-            butterfly_reason,
-        ) = self.calculate_butterfly_distance(distance_input)
+        (butterfly_distance, butterfly_confidence, butterfly_reason) = (
+            self.calculate_butterfly_distance(distance_input)
+        )
 
         final_distance, final_confidence, fuse_reason = self.fuse_distances(
             horizontal_distance,
