@@ -160,14 +160,10 @@ class DistanceAPI:
             )
 
         if default_ship_length_m <= 0.0:
-            raise ValueError(
-                "default_ship_length_m sıfırdan büyük olmalıdır."
-            )
+            raise ValueError("default_ship_length_m sıfırdan büyük olmalıdır.")
 
         if default_ship_height_m <= 0.0:
-            raise ValueError(
-                "default_ship_height_m sıfırdan büyük olmalıdır."
-            )
+            raise ValueError("default_ship_height_m sıfırdan büyük olmalıdır.")
 
         if not 0.0 <= refraction_k < 1.0:
             raise ValueError("refraction_k 0 ile 1 arasında olmalıdır.")
@@ -267,8 +263,7 @@ class DistanceAPI:
         return 0.0
 
     def validate_input(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> str | None:
         """Mesafe girdilerinin kullanılabilir olup olmadığını kontrol eder."""
         if distance_input.image_width <= 0:
@@ -312,23 +307,16 @@ class DistanceAPI:
 
     def horizon_dip_rad(self: "DistanceAPI", camera_height_m: float) -> float:
         """Kamera yüksekliğine göre teorik ufuk çöküşünü hesaplar."""
-        return math.sqrt(
-            2.0 * camera_height_m / self.effective_earth_radius()
-        )
+        return math.sqrt(2.0 * camera_height_m / self.effective_earth_radius())
 
     def maximum_sea_distance_m(
-        self: "DistanceAPI",
-        camera_height_m: float,
+        self: "DistanceAPI", camera_height_m: float
     ) -> float:
         """Kamera yüksekliğine göre teorik maksimum deniz mesafesini hesaplar."""
-        return math.sqrt(
-            2.0 * self.effective_earth_radius() * camera_height_m
-        )
+        return math.sqrt(2.0 * self.effective_earth_radius() * camera_height_m)
 
     def sea_distance_from_depression(
-        self: "DistanceAPI",
-        alpha_rad: float,
-        camera_height_m: float,
+        self: "DistanceAPI", alpha_rad: float, camera_height_m: float
     ) -> float | None:
         """Aşağı bakış açısıyla deniz yüzeyi kesişim mesafesini hesaplar."""
         horizon_dip = self.horizon_dip_rad(camera_height_m)
@@ -348,16 +336,12 @@ class DistanceAPI:
         if discriminant <= 0.0:
             return min(maximum_distance, self.max_distance_m)
 
-        distance = (
-            effective_radius * tangent_value
-            - math.sqrt(discriminant)
-        )
+        distance = effective_radius * tangent_value - math.sqrt(discriminant)
 
         return min(distance, maximum_distance, self.max_distance_m)
 
     def predict_horizon_y(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> float:
         """Tilt, pitch ve FOV değerleriyle yaklaşık ufuk y konumunu hesaplar."""
         if distance_input.horizon_y is not None:
@@ -378,10 +362,9 @@ class DistanceAPI:
 
         pitch_down_deg += distance_input.pitch_deg
 
-        angle_rad = (
-            self.horizon_dip_rad(distance_input.camera_height_m)
-            - math.radians(pitch_down_deg)
-        )
+        angle_rad = self.horizon_dip_rad(
+            distance_input.camera_height_m
+        ) - math.radians(pitch_down_deg)
 
         angle_rad = self.clamp(angle_rad, -1.2, 1.2)
 
@@ -394,8 +377,7 @@ class DistanceAPI:
         )
 
     def get_water_point(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> tuple[float, float]:
         """BBox içinden yaklaşık su hattı noktasını seçer."""
         x1, y1, x2, y2 = self.bbox_to_xyxy(distance_input)
@@ -431,8 +413,7 @@ class DistanceAPI:
         return water_x, water_y
 
     def calculate_horizontal_line_distance(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> CandidateDistance:
         """Horizon ve bbox su hattından deniz mesafesi hesaplar."""
         fx_value, fy_value = self.focal_from_fov(
@@ -471,13 +452,11 @@ class DistanceAPI:
             )
 
         alpha_rad = (
-            self.horizon_dip_rad(distance_input.camera_height_m)
-            + beta_rad
+            self.horizon_dip_rad(distance_input.camera_height_m) + beta_rad
         )
 
         forward_distance = self.sea_distance_from_depression(
-            alpha_rad,
-            distance_input.camera_height_m,
+            alpha_rad, distance_input.camera_height_m
         )
 
         if forward_distance is None:
@@ -488,15 +467,10 @@ class DistanceAPI:
                 reason="horizontal_distance_unavailable",
             )
 
-        horizontal_angle_rad = math.atan(
-            (water_x - center_x) / fx_value
-        )
+        horizontal_angle_rad = math.atan((water_x - center_x) / fx_value)
 
         total_distance = abs(
-            forward_distance / max(
-                math.cos(horizontal_angle_rad),
-                1e-6,
-            )
+            forward_distance / max(math.cos(horizontal_angle_rad), 1e-6)
         )
 
         if not self.min_distance_m <= total_distance <= self.max_distance_m:
@@ -541,8 +515,7 @@ class DistanceAPI:
         )
 
     def calculate_butterfly_distance(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> CandidateDistance:
         """BBox piksel boyutu ve FOV ile kelebek geometrisi hesabı yapar."""
         fx_value, fy_value = self.focal_from_fov(
@@ -554,40 +527,20 @@ class DistanceAPI:
 
         aspect_ratio = distance_input.w / max(distance_input.h, 1.0)
 
-        side_score = self.clamp(
-            (aspect_ratio - 1.2) / 2.8,
-            0.0,
-            1.0,
-        )
+        side_score = self.clamp((aspect_ratio - 1.2) / 2.8, 0.0, 1.0)
 
-        bow_score = self.clamp(
-            (1.8 - aspect_ratio) / 1.2,
-            0.0,
-            1.0,
-        )
+        bow_score = self.clamp((1.8 - aspect_ratio) / 1.2, 0.0, 1.0)
 
-        width_confidence = self.clamp(
-            0.10 + 0.75 * side_score,
-            0.10,
-            0.85,
-        )
+        width_confidence = self.clamp(0.10 + 0.75 * side_score, 0.10, 0.85)
 
-        height_confidence = self.clamp(
-            0.25 + 0.35 * bow_score,
-            0.20,
-            0.60,
-        )
+        height_confidence = self.clamp(0.25 + 0.35 * bow_score, 0.20, 0.60)
 
         width_distance = (
-            self.default_ship_length_m
-            * fx_value
-            / distance_input.w
+            self.default_ship_length_m * fx_value / distance_input.w
         )
 
         height_distance = (
-            self.default_ship_height_m
-            * fy_value
-            / distance_input.h
+            self.default_ship_height_m * fy_value / distance_input.h
         )
 
         total_weight = width_confidence + height_confidence
@@ -616,21 +569,11 @@ class DistanceAPI:
         frame_area = float(
             distance_input.image_width * distance_input.image_height
         )
-        box_area_ratio = (
-            distance_input.w * distance_input.h
-        ) / frame_area
+        box_area_ratio = (distance_input.w * distance_input.h) / frame_area
 
-        size_score = self.clamp(
-            (box_area_ratio - 0.00012) / 0.014,
-            0.0,
-            1.0,
-        )
+        size_score = self.clamp((box_area_ratio - 0.00012) / 0.014, 0.0, 1.0)
 
-        bbox_confidence = self.clamp(
-            0.30 + 0.70 * size_score,
-            0.05,
-            1.0,
-        )
+        bbox_confidence = self.clamp(0.30 + 0.70 * size_score, 0.05, 1.0)
 
         confidence = bbox_confidence * (
             0.35 + 0.65 * max(width_confidence, height_confidence)
@@ -645,8 +588,7 @@ class DistanceAPI:
         )
 
         very_narrow_fov = (
-            distance_input.fov_h_deg <= 9.0
-            or distance_input.fov_v_deg <= 7.0
+            distance_input.fov_h_deg <= 9.0 or distance_input.fov_v_deg <= 7.0
         )
 
         large_close_box = box_area_ratio >= 0.040
@@ -728,8 +670,7 @@ class DistanceAPI:
         butterfly_distance = butterfly_result.distance_m
 
         ratio = max(horizontal_distance, butterfly_distance) / max(
-            min(horizontal_distance, butterfly_distance),
-            1.0,
+            min(horizontal_distance, butterfly_distance), 1.0
         )
 
         if ratio > DISAGREEMENT_RATIO_THRESHOLD:
@@ -750,14 +691,8 @@ class DistanceAPI:
                 butterfly_weight = 0.65
                 reason = "hybrid_disagreement_low_confidence"
         else:
-            horizontal_weight = 0.35 * max(
-                horizontal_result.confidence,
-                0.05,
-            )
-            butterfly_weight = 0.65 * max(
-                butterfly_result.confidence,
-                0.05,
-            )
+            horizontal_weight = 0.35 * max(horizontal_result.confidence, 0.05)
+            butterfly_weight = 0.65 * max(butterfly_result.confidence, 0.05)
             reason = "hybrid_agree"
 
         final_distance = self.weighted_log_average(
@@ -780,8 +715,7 @@ class DistanceAPI:
         return final_distance, final_confidence, reason
 
     def calc_distance(
-        self: "DistanceAPI",
-        distance_input: DistanceInput,
+        self: "DistanceAPI", distance_input: DistanceInput
     ) -> DistanceOutput:
         """Tek detection için nihai mesafe sonucunu üretir."""
         validation_error = self.validate_input(distance_input)
@@ -803,13 +737,10 @@ class DistanceAPI:
             distance_input
         )
 
-        butterfly_result = self.calculate_butterfly_distance(
-            distance_input
-        )
+        butterfly_result = self.calculate_butterfly_distance(distance_input)
 
         final_distance, final_confidence, reason = self.fuse_distances(
-            horizontal_result,
-            butterfly_result,
+            horizontal_result, butterfly_result
         )
 
         if final_distance is None:
