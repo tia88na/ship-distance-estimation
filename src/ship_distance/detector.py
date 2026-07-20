@@ -426,9 +426,7 @@ def is_probable_bottom_structure(
     return False
 
 
-def is_thermal_edge_fragment(
-    det: Detection, sensor_info: SensorRow
-) -> bool:
+def is_thermal_edge_fragment(det: Detection, sensor_info: SensorRow) -> bool:
     """Dar FOV termalde ekran kenarındaki parça kutuları ayıklar.
 
     Args:
