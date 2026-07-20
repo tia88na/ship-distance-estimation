@@ -50,7 +50,7 @@ class DistanceHlApi:
     """Ufuk çizgisi ve bbox su hattından deniz mesafesi hesaplar."""
 
     def __init__(
-        self,
+    self: DistanceHlApi,
         min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
         max_distance_m: float = DEFAULT_MAX_DISTANCE_M,
         refraction_k: float = DEFAULT_REFRACTION_K,
@@ -72,7 +72,7 @@ class DistanceHlApi:
         self.refraction_k = float(refraction_k)
 
     def calc_distance(
-        self,
+    self: DistanceHlApi,
         track_id: int,
         box: Box,
         image_width: int,
@@ -314,12 +314,12 @@ class DistanceHlApi:
 
         return 0.0
 
-    def _effective_earth_radius(self) -> float:
-        """Atmosferik kırılma düzeltilmiş Dünya yarıçapını döndürür."""
+def _effective_earth_radius(self: DistanceHlApi) -> float:
+    """Atmosferik kırılma düzeltilmiş Dünya yarıçapını döndürür."""
         return EARTH_RADIUS_M / (1.0 - self.refraction_k)
 
     def _horizon_dip_rad(
-        self,
+        self: DistanceHlApi,
         camera_height_m: float,
     ) -> float:
         """Kamera yüksekliğine göre teorik ufuk çöküşünü hesaplar."""
@@ -328,7 +328,7 @@ class DistanceHlApi:
         )
 
     def _maximum_sea_distance_m(
-        self,
+        self: DistanceHlApi,
         camera_height_m: float,
     ) -> float:
         """Kameranın görebileceği teorik en uzak deniz mesafesini hesaplar."""
@@ -337,7 +337,7 @@ class DistanceHlApi:
         )
 
     def _sea_distance_from_depression(
-        self,
+        self: DistanceHlApi,
         depression_rad: float,
         camera_height_m: float,
     ) -> float | None:
@@ -378,7 +378,7 @@ class DistanceHlApi:
         )
 
     def _predict_horizon_y(
-        self,
+        self: DistanceHlApi,
         image_height: int,
         focal_y: float,
         tilt_deg: float,
@@ -417,7 +417,7 @@ class DistanceHlApi:
         )
 
     def _get_water_point(
-        self,
+        self: DistanceHlApi,
         box: Box,
         image_width: int,
         image_height: int,
@@ -461,7 +461,7 @@ class DistanceHlApi:
         return water_x, water_y
 
     def _calculate_confidence(
-        self,
+        self: DistanceHlApi,
         beta_deg: float,
         fov_h_deg: float,
         roll_deg: float,
