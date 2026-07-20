@@ -2,9 +2,8 @@
 
 from pathlib import Path
 
-import cv2
-
 from config import AppConfig
+import cv2
 from distance_butterfly_api import DistanceButterflyApi
 from distance_hl_api import DistanceHlApi
 from sensor_reader import load_sensor_csv
@@ -150,10 +149,7 @@ def main() -> None:
                 thermal_frame = None
 
             current_tick = cv2.getTickCount()
-            fps = cv2.getTickFrequency() / max(
-                current_tick - previous_tick,
-                1,
-            )
+            fps = cv2.getTickFrequency() / max(current_tick - previous_tick, 1)
             previous_tick = current_tick
 
             # API nesneleri ve kamera yüksekliği takip katmanına iletilir.
