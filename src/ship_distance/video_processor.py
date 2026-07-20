@@ -5,20 +5,21 @@ için sensör bilgisi alınır, FOV değişimi takip edilir, kamera hareketi tah
 edilir, ufuk çizgisi güncellenir, gerektiğinde tekne tespiti yapılır ve mevcut
 track listesi güncellenir.
 
-Not:
-    RGB ve termal akışlar bu dosyada hâlâ ayrı ayrı işlenir. Bu yüzden gerçek
-    RGB-thermal obje eşleştirme bu dosyanın tek başına görevi değildir. Ancak
-    dar FOV / zoomlu termal görüntülerde bbox-size kaynaklı mesafe sapmalarını
-    azaltmak için termal track'lere ek güvenlik düzeltmesi uygulanır.
+RGB ve termal akışların state bilgileri ayrı tutulur. Dar FOV veya yüksek
+zoom kullanılan termal görüntülerde, bbox kaynaklı mesafe sapmasını azaltmak
+için yalnızca termal track'lere ek güvenlik düzeltmesi uygulanır.
 """
 
 import math
 from typing import TypeAlias, cast
 
 import cv2
-from detector import detect_boats
-from geometry import create_horizon_state, focal_from_fov, update_horizon
 import numpy as np
+
+from detector import detect_boats
+from distance_butterfly_api import DistanceButterflyApi
+from distance_hl_api import DistanceHlApi
+from geometry import create_horizon_state, focal_from_fov, update_horizon
 from sensor_reader import SensorRow, get_sensor_for_time, smooth_sensor
 from tracker import (
     apply_fov_rescale,
@@ -165,17 +166,8 @@ def get_track_box(track: dict[str, object]) -> tuple[float, float, float, float]
     return None
 
 
-def get_track_distance(
-    track: dict[str, object],
-) -> tuple[str | None, float | None]:
-    """Track sözlüğündeki aktif mesafe alanını bulur.
-
-    Args:
-        track: Tek bir track sözlüğü.
-
-    Returns:
-        Mesafe alan adı ve mesafe değeri. Bulunamazsa ikisi de None olur.
-    """
+def get_track_distance(track: dict[str, object]) -> float | None:
+    """Track sözlüğündeki kullanılabilir mesafe değerini döndürür."""
     for key in (
         "distance",
         "distance_m",
@@ -185,9 +177,9 @@ def get_track_distance(
         value = track.get(key)
 
         if isinstance(value, int | float) and math.isfinite(float(value)):
-            return key, float(value)
+            return float(value)
 
-    return None, None
+    return None
 
 
 def set_track_distance(
@@ -285,9 +277,9 @@ def apply_thermal_distance_guard(
         if not risky:
             continue
 
-        distance_key, current_distance = get_track_distance(track)
+        current_distance = get_track_distance(track)
 
-        if distance_key is None or current_distance is None:
+        if current_distance is None:
             continue
 
         horizon_distance = track.get("horizon_distance")
@@ -336,6 +328,9 @@ def process_stream_frame(
     model: object,
     frame_index: int,
     video_fps: float,
+    distance_hl_api: DistanceHlApi,
+    distance_butterfly_api: DistanceButterflyApi,
+    camera_height_m: float,
 ) -> tuple[np.ndarray, bool]:
     """Tek bir RGB veya termal frame'i işler.
 
@@ -350,6 +345,9 @@ def process_stream_frame(
         model: Detection sırasında kullanılacak model nesnesi.
         frame_index: İşlenen frame'in video içindeki sıra numarası.
         video_fps: Video FPS değeri.
+        distance_hl_api: Ufuk geometrisiyle mesafe hesaplayan API.
+        distance_butterfly_api: Bbox boyutuyla mesafe hesaplayan API.
+        camera_height_m: Kameranın deniz seviyesinden yüksekliği.
 
     Returns:
         İşlenmiş frame ve kameranın hareket edip etmediğini belirten değer.
@@ -483,7 +481,9 @@ def process_stream_frame(
             frame, model, sensor_info, horizon_state, mode, channel=channel
         )
 
-    # Detection sonuçları, optical flow ve önceki track bilgileriyle birleştirilir.
+    # Tracker; detection, optical flow ve önceki track bilgisini birleştirir.
+    # Mesafe API'leri yalnızca burada aşağı katmana aktarılır. Böylece bu dosya
+    # mesafe formüllerini içermez ve frame işleme sorumluluğunda kalır.
     tracks, next_track_id = update_tracks(
         detections=detections,
         tracks=tracks,
@@ -496,6 +496,11 @@ def process_stream_frame(
         skip_optical=zooming,
         global_flow=(gdx, gdy),
         global_flow_ok=gflow_ok,
+        distance_hl_api=distance_hl_api,
+        distance_butterfly_api=distance_butterfly_api,
+        camera_height_m=camera_height_m,
+        horizon_state=horizon_state,
+        video_fps=video_fps,
     )
 
     # RGB tarafı aynı kalır. Sadece dar FOV / zoomlu termal görüntülerde,
