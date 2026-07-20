@@ -17,8 +17,6 @@ from statistics import median
 from typing import TypeAlias, cast
 
 import cv2
-import numpy as np
-
 from detector import (
     box_to_int,
     calculate_iou,
@@ -41,6 +39,7 @@ from geometry import (
     PROCESS_WIDTH,
     clamp_horizon_y,
 )
+import numpy as np
 from sensor_reader import SensorRow
 
 
@@ -813,11 +812,7 @@ def clamp_range_change(
     return max(lower, min(upper, candidate_distance))
 
 
-def _sensor_float(
-    sensor_info: SensorRow,
-    key: str,
-    default: float,
-) -> float:
+def _sensor_float(sensor_info: SensorRow, key: str, default: float) -> float:
     """Sensör sözlüğünden sonlu bir float değeri okur."""
     value = sensor_info.get(key)
 
@@ -853,7 +848,9 @@ def _fuse_distance_results(
     horizontal_distance = horizontal_result.distance_m
     butterfly_distance = butterfly_result.distance_m
 
-    horizontal_valid = horizontal_result.valid and horizontal_distance is not None
+    horizontal_valid = (
+        horizontal_result.valid and horizontal_distance is not None
+    )
     butterfly_valid = butterfly_result.valid and butterfly_distance is not None
 
     # Aday sonuçlar debug, termal guard ve görselleştirme için korunur.
@@ -913,8 +910,7 @@ def _fuse_distance_results(
     assert butterfly_distance is not None
 
     ratio = max(horizontal_distance, butterfly_distance) / max(
-        min(horizontal_distance, butterfly_distance),
-        1.0,
+        min(horizontal_distance, butterfly_distance), 1.0
     )
 
     # İki yöntem belirgin biçimde ayrışıyorsa bbox sonucu, kendi güvenine göre
@@ -1023,8 +1019,7 @@ def _calculate_raw_distance(
 
 
 def _cache_distance_result(
-    track: Track,
-    result: DistanceResult,
+    track: Track, result: DistanceResult
 ) -> DistanceResult:
     """Mesafe sonucunu tracker, guard ve visualizer için ortak alanlara yazar."""
     track["last_result"] = result
@@ -1043,8 +1038,7 @@ def _cache_distance_result(
 
 
 def distance_alpha_from_confidence(
-    track: Track,
-    raw_result: DistanceResult,
+    track: Track, raw_result: DistanceResult
 ) -> float:
     """Ölçüm güvenine ve track güncelliğine göre smoothing katsayısı üretir."""
     confidence = float(raw_result.get("distance_confidence", 0.30))
@@ -1164,14 +1158,12 @@ def calculate_track_distance(
 
     dt_value = frame_delta / max(video_fps, 1.0)
     max_rate = max(
-        RANGE_MIN_RATE_M_PER_SEC,
-        previous_locked * RANGE_RELATIVE_RATE_PER_SEC,
+        RANGE_MIN_RATE_M_PER_SEC, previous_locked * RANGE_RELATIVE_RATE_PER_SEC
     )
     max_delta = max_rate * dt_value
 
     ratio = max(raw_distance, previous_locked) / max(
-        min(raw_distance, previous_locked),
-        1e-6,
+        min(raw_distance, previous_locked), 1e-6
     )
 
     if ratio > MAX_ACCEPTED_RAW_JUMP_RATIO:
@@ -1193,17 +1185,14 @@ def calculate_track_distance(
         track["range_reject_count"] = 0
         alpha = distance_alpha_from_confidence(track, raw_result)
         candidate_distance = (
-            (1.0 - alpha) * previous_locked + alpha * raw_distance
-        )
+            1.0 - alpha
+        ) * previous_locked + alpha * raw_distance
 
     locked_distance = clamp_range_change(
-        previous_locked,
-        candidate_distance,
-        max_delta,
+        previous_locked, candidate_distance, max_delta
     )
     locked_distance = max(
-        MIN_VALID_DISTANCE_M,
-        min(MAX_SEA_DISTANCE_M, locked_distance),
+        MIN_VALID_DISTANCE_M, min(MAX_SEA_DISTANCE_M, locked_distance)
     )
 
     track["range_locked_m"] = locked_distance
