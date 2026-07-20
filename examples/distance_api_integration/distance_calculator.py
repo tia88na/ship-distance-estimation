@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 from typing import Literal
 
+
 try:
     from ship_distance.distance_butterfly_api import (
         DistanceButterflyApi,
@@ -59,10 +60,7 @@ class DistanceCalculator:
 
     @staticmethod
     def update_roll_pitch_due_to_eis(
-        camera_type: str,
-        roll: float,
-        pitch: float,
-        stream: str,
+        camera_type: str, roll: float, pitch: float, stream: str
     ) -> tuple[float, float]:
         """EIS etkisine göre roll ve pitch değerlerini düzeltir.
 
@@ -93,8 +91,7 @@ class DistanceCalculator:
 
     @staticmethod
     def find_thermal_detection(
-        track_id: int,
-        tors: list[ThermalObjectDetectionResult],
+        track_id: int, tors: list[ThermalObjectDetectionResult]
     ) -> ThermalObjectDetectionResult | None:
         """Track ID ile eşleşen termal detection sonucunu döndürür."""
         for thermal_detection in tors:
@@ -104,13 +101,7 @@ class DistanceCalculator:
         return None
 
     @staticmethod
-    def create_box(
-        *,
-        x: float,
-        y: float,
-        width: float,
-        height: float,
-    ) -> Box:
+    def create_box(*, x: float, y: float, width: float, height: float) -> Box:
         """Merkez koordinatı ve boyuttan ``xyxy`` bbox üretir.
 
         Mevcut entegrasyonda ``x`` ve ``y`` bbox merkezidir. Alt noktanın önceki
@@ -128,8 +119,7 @@ class DistanceCalculator:
 
     @staticmethod
     def combine_distance_results(
-        hl_result: DistanceHlResult,
-        butterfly_result: DistanceButterflyResult,
+        hl_result: DistanceHlResult, butterfly_result: DistanceButterflyResult
     ) -> float | None:
         """İki bağımsız API sonucundan tek bir mesafe seçer.
 
@@ -207,10 +197,7 @@ class DistanceCalculator:
             zoom=float(zoom),
         )
 
-        distance_m = self.combine_distance_results(
-            hl_result,
-            butterfly_result,
-        )
+        distance_m = self.combine_distance_results(hl_result, butterfly_result)
 
         # Projenin tanımlı azami mesafe sınırı entegrasyon çıkışında uygulanır.
         if distance_m is None or not 0.0 < distance_m <= self.max_distance_m:
@@ -244,23 +231,16 @@ class DistanceCalculator:
         camera_height_m = float(camera_parameters["CAMERA_HEIGHT"])
 
         roll_rgb, pitch_rgb = self.update_roll_pitch_due_to_eis(
-            camera_type,
-            roll,
-            pitch,
-            "RGB",
+            camera_type, roll, pitch, "RGB"
         )
         roll_thr, pitch_thr = self.update_roll_pitch_due_to_eis(
-            camera_type,
-            roll,
-            pitch,
-            "THR",
+            camera_type, roll, pitch, "THR"
         )
 
         for detection in detections:
             if detection.name == "Obstacle":
                 thermal_detection = self.find_thermal_detection(
-                    detection.track_id,
-                    tors,
+                    detection.track_id, tors
                 )
 
                 if thermal_detection is None:
