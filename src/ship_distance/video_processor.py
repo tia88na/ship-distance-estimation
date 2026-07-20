@@ -14,12 +14,11 @@ import math
 from typing import TypeAlias, cast
 
 import cv2
-import numpy as np
-
 from detector import detect_boats
 from distance_butterfly_api import DistanceButterflyApi
 from distance_hl_api import DistanceHlApi
 from geometry import create_horizon_state, focal_from_fov, update_horizon
+import numpy as np
 from sensor_reader import SensorRow, get_sensor_for_time, smooth_sensor
 from tracker import (
     apply_fov_rescale,
@@ -140,7 +139,9 @@ def weighted_log_blend(
     )
 
 
-def get_track_box(track: dict[str, object]) -> tuple[float, float, float, float] | None:
+def get_track_box(
+    track: dict[str, object]
+) -> tuple[float, float, float, float] | None:
     """Track sözlüğünden bbox değerini bulur.
 
     Tracker tarafında farklı isimlendirmeler kullanılabildiği için birkaç yaygın
@@ -182,9 +183,7 @@ def get_track_distance(track: dict[str, object]) -> float | None:
     return None
 
 
-def set_track_distance(
-    track: dict[str, object], distance_m: float
-) -> None:
+def set_track_distance(track: dict[str, object], distance_m: float) -> None:
     """Track sözlüğündeki mesafe alanlarını günceller.
 
     Args:
@@ -204,8 +203,7 @@ def set_track_distance(
 
 
 def is_thermal_distance_risky(
-    box: tuple[float, float, float, float],
-    sensor_info: SensorRow,
+    box: tuple[float, float, float, float], sensor_info: SensorRow
 ) -> tuple[bool, str]:
     """Termal bbox mesafesinin riskli olup olmadığını değerlendirir.
 
@@ -247,8 +245,7 @@ def is_thermal_distance_risky(
 
 
 def apply_thermal_distance_guard(
-    tracks: TrackMap,
-    sensor_info: SensorRow,
+    tracks: TrackMap, sensor_info: SensorRow
 ) -> None:
     """Dar FOV termal track'lerde mesafe sapmasını azaltır.
 
@@ -288,7 +285,10 @@ def apply_thermal_distance_guard(
         adjusted_distance = current_distance
         adjustment_reason = risk_reason
 
-        if isinstance(horizon_distance, int | float) and float(horizon_distance) > 1.0:
+        if (
+            isinstance(horizon_distance, int | float)
+            and float(horizon_distance) > 1.0
+        ):
             horizon_distance_float = float(horizon_distance)
 
             # Termal final mesafe, horizon mesafesinden belirgin yüksekse
@@ -296,10 +296,7 @@ def apply_thermal_distance_guard(
             # sonucuna doğru çekiyoruz ama tamamen horizon-only yapmıyoruz.
             if current_distance > horizon_distance_float * 1.12:
                 adjusted_distance = weighted_log_blend(
-                    current_distance,
-                    0.30,
-                    horizon_distance_float,
-                    0.70,
+                    current_distance, 0.30, horizon_distance_float, 0.70
                 )
                 adjustment_reason = f"{risk_reason}_blend_horizon"
         else:
