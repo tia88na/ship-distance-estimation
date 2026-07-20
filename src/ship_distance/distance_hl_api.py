@@ -50,7 +50,7 @@ class DistanceHlApi:
     """Ufuk çizgisi ve bbox su hattından deniz mesafesi hesaplar."""
 
     def __init__(
-    self: DistanceHlApi,
+        self: DistanceHlApi,
         min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
         max_distance_m: float = DEFAULT_MAX_DISTANCE_M,
         refraction_k: float = DEFAULT_REFRACTION_K,
@@ -72,7 +72,7 @@ class DistanceHlApi:
         self.refraction_k = float(refraction_k)
 
     def calc_distance(
-    self: DistanceHlApi,
+        self: DistanceHlApi,
         track_id: int,
         box: Box,
         image_width: int,
@@ -208,8 +208,7 @@ class DistanceHlApi:
         depression_rad = self._horizon_dip_rad(camera_height_m) + beta_rad
 
         distance_m = self._sea_distance_from_depression(
-            depression_rad=depression_rad,
-            camera_height_m=camera_height_m,
+            depression_rad=depression_rad, camera_height_m=camera_height_m
         )
 
         if distance_m is None:
@@ -234,10 +233,7 @@ class DistanceHlApi:
         )
 
     @staticmethod
-    def _invalid_result(
-        track_id: int,
-        reason: str,
-    ) -> DistanceHlResult:
+    def _invalid_result(track_id: int, reason: str) -> DistanceHlResult:
         """Geçersiz hesaplar için ortak sonuç oluşturur."""
         return DistanceHlResult(
             track_id=track_id,
@@ -248,11 +244,7 @@ class DistanceHlApi:
         )
 
     @staticmethod
-    def _clamp(
-        value: float,
-        minimum: float,
-        maximum: float,
-    ) -> float:
+    def _clamp(value: float, minimum: float, maximum: float) -> float:
         """Bir değeri verilen alt ve üst sınırlar içinde tutar."""
         return max(minimum, min(maximum, value))
 
@@ -296,9 +288,7 @@ class DistanceHlApi:
         return rotated_x, rotated_y
 
     @staticmethod
-    def _resolve_pitch_down_from_tilt(
-        tilt_deg: float,
-    ) -> float:
+    def _resolve_pitch_down_from_tilt(tilt_deg: float) -> float:
         """Farklı tilt aralıklarını ortak aşağı bakış açısına dönüştürür."""
         if 100.0 <= tilt_deg <= 180.0:
             return tilt_deg - 130.0
@@ -314,22 +304,18 @@ class DistanceHlApi:
 
         return 0.0
 
-def _effective_earth_radius(self: DistanceHlApi) -> float:
-    """Atmosferik kırılma düzeltilmiş Dünya yarıçapını döndürür."""
+    def _effective_earth_radius(self: DistanceHlApi) -> float:
+        """Atmosferik kırılma düzeltilmiş Dünya yarıçapını döndürür."""
         return EARTH_RADIUS_M / (1.0 - self.refraction_k)
 
-    def _horizon_dip_rad(
-        self: DistanceHlApi,
-        camera_height_m: float,
-    ) -> float:
+    def _horizon_dip_rad(self: DistanceHlApi, camera_height_m: float) -> float:
         """Kamera yüksekliğine göre teorik ufuk çöküşünü hesaplar."""
         return math.sqrt(
             2.0 * camera_height_m / self._effective_earth_radius()
         )
 
     def _maximum_sea_distance_m(
-        self: DistanceHlApi,
-        camera_height_m: float,
+        self: DistanceHlApi, camera_height_m: float
     ) -> float:
         """Kameranın görebileceği teorik en uzak deniz mesafesini hesaplar."""
         return math.sqrt(
@@ -337,9 +323,7 @@ def _effective_earth_radius(self: DistanceHlApi) -> float:
         )
 
     def _sea_distance_from_depression(
-        self: DistanceHlApi,
-        depression_rad: float,
-        camera_height_m: float,
+        self: DistanceHlApi, depression_rad: float, camera_height_m: float
     ) -> float | None:
         """Aşağı bakış açısının deniz yüzeyiyle kesiştiği mesafeyi hesaplar."""
         horizon_dip = self._horizon_dip_rad(camera_height_m)
@@ -363,19 +347,12 @@ def _effective_earth_radius(self: DistanceHlApi) -> float:
         if discriminant <= 0.0:
             return min(maximum_distance, self.max_distance_m)
 
-        distance_m = (
-            effective_radius * tangent_value
-            - math.sqrt(discriminant)
-        )
+        distance_m = effective_radius * tangent_value - math.sqrt(discriminant)
 
         if not math.isfinite(distance_m) or distance_m <= 0.0:
             return None
 
-        return min(
-            distance_m,
-            maximum_distance,
-            self.max_distance_m,
-        )
+        return min(distance_m, maximum_distance, self.max_distance_m)
 
     def _predict_horizon_y(
         self: DistanceHlApi,
@@ -387,34 +364,21 @@ def _effective_earth_radius(self: DistanceHlApi) -> float:
     ) -> float:
         """Tilt, pitch ve kamera geometrisinden yaklaşık ufuk değeri üretir."""
         pitch_down_deg = (
-            self._resolve_pitch_down_from_tilt(tilt_deg)
-            + pitch_deg
+            self._resolve_pitch_down_from_tilt(tilt_deg) + pitch_deg
         )
 
         # Pozitif aşağı bakış açısı ufuk çizgisini görüntü içinde yukarı taşır.
-        horizon_angle_rad = (
-            self._horizon_dip_rad(camera_height_m)
-            - math.radians(pitch_down_deg)
-        )
+        horizon_angle_rad = self._horizon_dip_rad(
+            camera_height_m
+        ) - math.radians(pitch_down_deg)
 
         # Aşırı sensör değerlerinin tanjant hesabını bozması engellenir.
-        horizon_angle_rad = self._clamp(
-            horizon_angle_rad,
-            -1.2,
-            1.2,
-        )
+        horizon_angle_rad = self._clamp(horizon_angle_rad, -1.2, 1.2)
 
-        horizon_y = (
-            image_height / 2.0
-            + focal_y * math.tan(horizon_angle_rad)
-        )
+        horizon_y = image_height / 2.0 + focal_y * math.tan(horizon_angle_rad)
 
         # Hesaplanan ufuk görüntünün tamamen dışına taşmamalıdır.
-        return self._clamp(
-            horizon_y,
-            image_height * 0.02,
-            image_height * 0.90,
-        )
+        return self._clamp(horizon_y, image_height * 0.02, image_height * 0.90)
 
     def _get_water_point(
         self: DistanceHlApi,
@@ -432,15 +396,9 @@ def _effective_earth_radius(self: DistanceHlApi) -> float:
         box_height = max(1.0, y2 - y1)
 
         frame_area = float(image_width * image_height)
-        box_area_ratio = (
-            box_width * box_height
-        ) / frame_area
+        box_area_ratio = (box_width * box_height) / frame_area
 
-        narrow_fov = (
-            fov_h_deg <= 12.0
-            or fov_v_deg <= 9.0
-            or zoom >= 0.85
-        )
+        narrow_fov = fov_h_deg <= 12.0 or fov_v_deg <= 9.0 or zoom >= 0.85
 
         large_close_box = box_area_ratio >= 0.040
 
@@ -499,8 +457,4 @@ def _effective_earth_radius(self: DistanceHlApi) -> float:
         if abs(pitch_deg) > 10.0:
             confidence *= 0.85
 
-        return self._clamp(
-            confidence,
-            0.05,
-            0.55,
-        )
+        return self._clamp(confidence, 0.05, 0.55)
