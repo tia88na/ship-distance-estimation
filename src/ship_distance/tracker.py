@@ -1,28 +1,24 @@
 """KLT tabanlı takip, kamera hareketi ve mesafe yumuşatma yardımcıları.
 
-Bu dosya detection sonuçlarını zaman içinde track haline getirir. KLT optical
-flow, global kamera hareketi, detection-track eşleştirme, FOV değişimine göre
-track kutusu ölçekleme ve mesafe değerinin frame'ler arasında yumuşatılması
-burada yapılır.
+Bu modül detection sonuçlarını track haline getirir; KLT optical flow, kamera
+hareketi, detection-track eşleştirme ve FOV değişimlerini yönetir.
 
-Önemli mesafe notu:
-Önceki sürümde mesafe yalnızca track içindeki waterline noktasından ve ufuk
-çizgisinden hesaplanıyordu. Bu yöntem bbox su hattı birkaç piksel hatalıysa
-özellikle dar FOV/zoom kayıtlarında kilometre seviyesinde sapma üretebilir.
+Mesafe hesabı iki bağımsız servis üzerinden yapılır:
+- DistanceHlApi, ufuk çizgisi ve su hattı geometrisini kullanır.
+- DistanceButterflyApi, bbox piksel boyutu ve FOV değerlerini kullanır.
 
-Bu sürümde tracker, geometry.py içindeki hibrit mesafe fonksiyonunu kullanır.
-Yani her track için:
-1. Horizon/waterline tabanlı mesafe,
-2. Bbox piksel boyutu + FOV/zoom tabanlı mesafe,
-3. Bu iki sonucun güven skoruna göre birleşimi
-beraber değerlendirilir.
+Tracker bu iki sonucu birleştirir ve kareler arasındaki ani mesafe değişimlerini
+sınırlandırır. Mesafe formülleri tracker içinde tekrar edilmez.
 """
 
 from collections import deque
+import math
 from statistics import median
 from typing import TypeAlias, cast
 
 import cv2
+import numpy as np
+
 from detector import (
     box_to_int,
     calculate_iou,
@@ -32,6 +28,11 @@ from detector import (
     horizontal_overlap_ratio,
     visible_box,
 )
+from distance_butterfly_api import (
+    DistanceButterflyApi,
+    DistanceButterflyResult,
+)
+from distance_hl_api import DistanceHlApi, DistanceHlResult
 from geometry import (
     CY,
     MAX_SEA_DISTANCE_M,
@@ -39,9 +40,7 @@ from geometry import (
     PROCESS_HEIGHT,
     PROCESS_WIDTH,
     clamp_horizon_y,
-    estimate_hybrid_distance_from_box,
 )
-import numpy as np
 from sensor_reader import SensorRow
 
 
@@ -631,6 +630,11 @@ def update_tracks(
     skip_optical: bool,
     global_flow: tuple[float, float],
     global_flow_ok: bool,
+    distance_hl_api: DistanceHlApi,
+    distance_butterfly_api: DistanceButterflyApi,
+    camera_height_m: float,
+    horizon_state: HorizonState,
+    video_fps: float,
 ) -> tuple[TrackMap, int]:
     """Aktif track listesini detection, KLT ve prediction ile günceller.
 
@@ -646,6 +650,11 @@ def update_tracks(
         skip_optical: Optical flow'un atlanıp atlanmayacağı.
         global_flow: Global kamera hareketi.
         global_flow_ok: Global kamera hareketinin güvenilir olup olmadığı.
+        distance_hl_api: Ufuk tabanlı mesafe API nesnesi.
+        distance_butterfly_api: Bbox tabanlı mesafe API nesnesi.
+        camera_height_m: Kameranın deniz seviyesinden yüksekliği.
+        horizon_state: Güncel ufuk çizgisi durumu.
+        video_fps: Mesafe değişim hızını hesaplamak için kullanılan FPS.
 
     Returns:
         Güncellenmiş track sözlüğü ve bir sonraki track id değeri.
@@ -763,6 +772,20 @@ def update_tracks(
         ):
             del tracks[track_id]
 
+    # Kutu güncellemeleri tamamlandıktan sonra her aktif track için iki bağımsız
+    # mesafe API'si çalıştırılır. Hesap son aşamada yapıldığı için API'ler daima
+    # frame'in güncel bbox, sensör ve ufuk bilgilerini kullanır.
+    for track in tracks.values():
+        calculate_track_distance(
+            track=track,
+            sensor_info=sensor_info,
+            horizon_state=horizon_state,
+            video_fps=video_fps,
+            distance_hl_api=distance_hl_api,
+            distance_butterfly_api=distance_butterfly_api,
+            camera_height_m=camera_height_m,
+        )
+
     return tracks, next_track_id
 
 
@@ -790,42 +813,240 @@ def clamp_range_change(
     return max(lower, min(upper, candidate_distance))
 
 
-def get_hybrid_raw_distance(
-    track: Track, sensor_info: SensorRow, horizon_state: HorizonState
-) -> DistanceResult:
-    """Track kutusu için hibrit ham mesafe sonucunu üretir.
+def _sensor_float(
+    sensor_info: SensorRow,
+    key: str,
+    default: float,
+) -> float:
+    """Sensör sözlüğünden sonlu bir float değeri okur."""
+    value = sensor_info.get(key)
 
-    Args:
-        track: Mesafesi hesaplanacak track.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
+    if isinstance(value, int | float) and math.isfinite(float(value)):
+        return float(value)
 
-    Returns:
-        geometry.py içindeki hibrit mesafe sonucu.
-    """
-    # Hibrit hesap doğrudan track box'ını kullanır. Böylece sadece waterline
-    # noktasına bağlı kalmaz; bbox genişliği/yüksekliği de mesafe tahminine
-    # dahil edilir.
-    box = cast(Box, track["box"])
+    return default
 
-    return cast(
-        DistanceResult,
-        estimate_hybrid_distance_from_box(box, sensor_info, horizon_state),
+
+def _weighted_log_average(
+    first_distance: float,
+    first_weight: float,
+    second_distance: float,
+    second_weight: float,
+) -> float:
+    """Pozitif mesafeleri çarpansal hataya dayanıklı biçimde birleştirir."""
+    total_weight = max(first_weight + second_weight, 1e-6)
+
+    return math.exp(
+        (
+            math.log(max(first_distance, 1.0)) * first_weight
+            + math.log(max(second_distance, 1.0)) * second_weight
+        )
+        / total_weight
     )
 
 
+def _fuse_distance_results(
+    horizontal_result: DistanceHlResult,
+    butterfly_result: DistanceButterflyResult,
+) -> DistanceResult:
+    """İki bağımsız API sonucunu tracker'ın kullandığı sözlüğe dönüştürür."""
+    horizontal_distance = horizontal_result.distance_m
+    butterfly_distance = butterfly_result.distance_m
+
+    horizontal_valid = horizontal_result.valid and horizontal_distance is not None
+    butterfly_valid = butterfly_result.valid and butterfly_distance is not None
+
+    # Aday sonuçlar debug, termal guard ve görselleştirme için korunur.
+    base_result: DistanceResult = {
+        "horizon_distance": horizontal_distance,
+        "size_distance": butterfly_distance,
+        "horizontal_line_distance_m": horizontal_distance,
+        "butterfly_distance_m": butterfly_distance,
+        "horizon_confidence": horizontal_result.confidence,
+        "size_confidence": butterfly_result.confidence,
+        "horizontal_confidence": horizontal_result.confidence,
+        "butterfly_confidence": butterfly_result.confidence,
+        "beta_deg": 0.0,
+    }
+
+    if not horizontal_valid and not butterfly_valid:
+        reason = (
+            "at_or_beyond_horizon"
+            if horizontal_result.reason == "at_or_beyond_horizon"
+            else "no_valid_distance"
+        )
+
+        return {
+            **base_result,
+            "valid": False,
+            "reason": reason,
+            "distance": None,
+            "raw_distance": None,
+            "distance_source": "none",
+            "distance_confidence": 0.0,
+        }
+
+    if horizontal_valid and not butterfly_valid:
+        return {
+            **base_result,
+            "valid": True,
+            "reason": "horizon_only",
+            "distance": horizontal_distance,
+            "raw_distance": horizontal_distance,
+            "distance_source": "horizon_only",
+            "distance_confidence": horizontal_result.confidence,
+        }
+
+    if butterfly_valid and not horizontal_valid:
+        return {
+            **base_result,
+            "valid": True,
+            "reason": "size_only",
+            "distance": butterfly_distance,
+            "raw_distance": butterfly_distance,
+            "distance_source": "size_only",
+            "distance_confidence": butterfly_result.confidence,
+        }
+
+    # Bu noktada her iki aday mesafe de geçerlidir.
+    assert horizontal_distance is not None
+    assert butterfly_distance is not None
+
+    ratio = max(horizontal_distance, butterfly_distance) / max(
+        min(horizontal_distance, butterfly_distance),
+        1.0,
+    )
+
+    # İki yöntem belirgin biçimde ayrışıyorsa bbox sonucu, kendi güvenine göre
+    # daha yüksek ağırlık alır. Sonuçlar yakınsa iki güven skoru doğrudan kullanılır.
+    if ratio > 1.85:
+        if butterfly_result.confidence >= 0.60:
+            horizontal_weight = 0.18
+            butterfly_weight = 0.82
+            reason = "size_dominant_high_confidence"
+        elif butterfly_result.confidence >= 0.42:
+            horizontal_weight = 0.28
+            butterfly_weight = 0.72
+            reason = "size_dominant_medium_confidence"
+        elif butterfly_result.confidence >= 0.30:
+            horizontal_weight = 0.38
+            butterfly_weight = 0.62
+            reason = "size_dominant_low_confidence"
+        else:
+            horizontal_weight = 0.35
+            butterfly_weight = 0.65
+            reason = "hybrid_disagreement_low_confidence"
+    else:
+        horizontal_weight = 0.35 * max(horizontal_result.confidence, 0.05)
+        butterfly_weight = 0.65 * max(butterfly_result.confidence, 0.05)
+        reason = "hybrid_agree"
+
+    fused_distance = _weighted_log_average(
+        horizontal_distance,
+        horizontal_weight,
+        butterfly_distance,
+        butterfly_weight,
+    )
+    confidence = max(
+        0.05,
+        min(
+            0.95,
+            0.5 * horizontal_result.confidence
+            + 0.5 * butterfly_result.confidence,
+        ),
+    )
+
+    return {
+        **base_result,
+        "valid": True,
+        "reason": reason,
+        "distance": fused_distance,
+        "raw_distance": fused_distance,
+        "distance_source": "hybrid",
+        "distance_confidence": confidence,
+    }
+
+
+def _calculate_raw_distance(
+    track: Track,
+    sensor_info: SensorRow,
+    horizon_state: HorizonState,
+    distance_hl_api: DistanceHlApi,
+    distance_butterfly_api: DistanceButterflyApi,
+    camera_height_m: float,
+) -> DistanceResult:
+    """Güncel track girdileriyle iki mesafe API'sini ayrı ayrı çalıştırır."""
+    track_id = int(track.get("id", 0))
+    box = cast(Box, track["box"])
+
+    fov_h_deg = _sensor_float(sensor_info, "fov_h", 65.7)
+    fov_v_deg = _sensor_float(sensor_info, "fov_v", 39.9)
+    tilt_deg = _sensor_float(sensor_info, "tilt", 90.0)
+    zoom = _sensor_float(sensor_info, "zoom", 0.0)
+    roll_deg = _sensor_float(sensor_info, "roll", 0.0)
+
+    horizon_value = horizon_state.get("y")
+    horizon_y = (
+        float(horizon_value)
+        if isinstance(horizon_value, int | float)
+        and math.isfinite(float(horizon_value))
+        else None
+    )
+    horizon_slope = _sensor_float(horizon_state, "slope", 0.0)
+
+    horizontal_result = distance_hl_api.calc_distance(
+        track_id=track_id,
+        box=box,
+        image_width=PROCESS_WIDTH,
+        image_height=PROCESS_HEIGHT,
+        fov_h_deg=fov_h_deg,
+        fov_v_deg=fov_v_deg,
+        tilt_deg=tilt_deg,
+        camera_height_m=camera_height_m,
+        zoom=zoom,
+        roll_deg=roll_deg,
+        pitch_deg=0.0,
+        horizon_y=horizon_y,
+        horizon_slope=horizon_slope,
+    )
+    butterfly_result = distance_butterfly_api.calc_distance(
+        track_id=track_id,
+        box=box,
+        image_width=PROCESS_WIDTH,
+        image_height=PROCESS_HEIGHT,
+        fov_h_deg=fov_h_deg,
+        fov_v_deg=fov_v_deg,
+        zoom=zoom,
+    )
+
+    return _fuse_distance_results(horizontal_result, butterfly_result)
+
+
+def _cache_distance_result(
+    track: Track,
+    result: DistanceResult,
+) -> DistanceResult:
+    """Mesafe sonucunu tracker, guard ve visualizer için ortak alanlara yazar."""
+    track["last_result"] = result
+    track["distance_source"] = result.get("distance_source")
+    track["distance_confidence"] = result.get("distance_confidence", 0.0)
+    track["horizon_distance"] = result.get("horizon_distance")
+    track["size_distance"] = result.get("size_distance")
+
+    distance = result.get("distance")
+
+    if result.get("valid") and isinstance(distance, int | float):
+        track["distance"] = float(distance)
+        track["distance_m"] = float(distance)
+
+    return result
+
+
 def distance_alpha_from_confidence(
-    track: Track, raw_result: DistanceResult
+    track: Track,
+    raw_result: DistanceResult,
 ) -> float:
-    """Mesafe güncelleme alpha değerini ölçüm güvenine göre ayarlar.
-
-    Args:
-        track: Güncellenecek track.
-        raw_result: Hibrit mesafe sonucu.
-
-    Returns:
-        Range smoothing için kullanılacak alpha değeri.
-    """
+    """Ölçüm güvenine ve track güncelliğine göre smoothing katsayısı üretir."""
     confidence = float(raw_result.get("distance_confidence", 0.30))
 
     if int(track.get("frames_since_update", 0)) <= 2:
@@ -833,9 +1054,7 @@ def distance_alpha_from_confidence(
     else:
         base_alpha = RANGE_UPDATE_ALPHA_KLT
 
-    # Güven düşükse yeni mesafenin etkisi azaltılır. Güven yüksekse mevcut
-    # alpha korunur. Bu özellikle KLT ile taşınan ama detection almayan kutularda
-    # mesafenin aşırı zıplamasını engeller.
+    # KLT ile taşınan veya güveni düşük ölçümlerin kilitli mesafeye etkisi azaltılır.
     return base_alpha * max(0.35, min(1.0, confidence / 0.55))
 
 
@@ -844,43 +1063,75 @@ def calculate_track_distance(
     sensor_info: SensorRow,
     horizon_state: HorizonState,
     video_fps: float,
+    distance_hl_api: DistanceHlApi | None = None,
+    distance_butterfly_api: DistanceButterflyApi | None = None,
+    camera_height_m: float | None = None,
 ) -> DistanceResult:
-    """Track için hibrit mesafe hesaplar ve sonucu yumuşatır.
+    """Track mesafesini hesaplar, filtreler ve sonucu track üzerinde saklar.
 
-    Args:
-        track: Mesafesi hesaplanacak track.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        video_fps: Video FPS değeri.
-
-    Returns:
-        Mesafe hesaplama sonucu.
+    API parametreleri update_tracks tarafından verilir. Visualizer bu fonksiyonu
+    eski dört parametreli biçimde çağırdığında yeniden hesap yapmak yerine tracker
+    içinde önceden hesaplanan son sonuç döndürülür.
     """
-    raw_result = get_hybrid_raw_distance(track, sensor_info, horizon_state)
+    if (
+        distance_hl_api is None
+        or distance_butterfly_api is None
+        or camera_height_m is None
+    ):
+        cached = cast(DistanceResult | None, track.get("last_result"))
 
-    # Debug ve ileride görselleştirme için son mesafe kaynağı track üzerinde
-    # saklanır. Örn: hybrid, size_only, horizon_only.
+        if cached is None:
+            return {
+                "valid": False,
+                "reason": "distance_not_calculated",
+                "distance": None,
+                "raw_distance": None,
+                "distance_source": "none",
+                "distance_confidence": 0.0,
+                "horizon_distance": None,
+                "size_distance": None,
+                "beta_deg": 0.0,
+            }
+
+        # Termal guard mesafeyi track alanında değiştirmiş olabilir. Görselleştirme
+        # çağrısında cache kopyalanır ve güncel track mesafesi sonuca yansıtılır.
+        current_distance = track.get("distance")
+
+        if cached.get("valid") and isinstance(current_distance, int | float):
+            displayed_result = cached.copy()
+            displayed_result["distance"] = float(current_distance)
+            return displayed_result
+
+        return cached
+
+    raw_result = _calculate_raw_distance(
+        track=track,
+        sensor_info=sensor_info,
+        horizon_state=horizon_state,
+        distance_hl_api=distance_hl_api,
+        distance_butterfly_api=distance_butterfly_api,
+        camera_height_m=camera_height_m,
+    )
+
+    # Aday mesafeler termal guard ve debug çıktıları için hemen track'e yazılır.
     track["distance_source"] = raw_result.get("distance_source")
     track["distance_confidence"] = raw_result.get("distance_confidence", 0.0)
+    track["horizon_distance"] = raw_result.get("horizon_distance")
+    track["size_distance"] = raw_result.get("size_distance")
 
     if not raw_result["valid"]:
         last = cast(DistanceResult | None, track.get("last_result"))
 
-        # Ufuk çizgisi ötesindeki ilk sonuç geçersiz olarak saklanır.
         if raw_result["reason"] == "at_or_beyond_horizon" and (
             last is None or not last.get("valid")
         ):
-            track["last_result"] = raw_result
-            return raw_result
+            return _cache_distance_result(track, raw_result)
 
-        # Yeni sonuç geçersiz ama önceki geçerli sonuç varsa ekranda son geçerli
-        # mesafe korunur. Böylece tek karelik bbox/KLT hatası ekrana ani "?"/0
-        # olarak yansımaz.
+        # Tek karelik geçersiz ölçümde son geçerli mesafe korunur.
         if last is not None and last.get("valid"):
             return last
 
-        track["last_result"] = raw_result
-        return raw_result
+        return _cache_distance_result(track, raw_result)
 
     raw_distance = float(raw_result["distance"])
     recent_raws = cast(deque[float], track["recent_raws"])
@@ -891,12 +1142,10 @@ def calculate_track_distance(
     if previous_locked is None:
         init_samples = cast(deque[float], track["range_init_samples"])
         init_samples.append(raw_distance)
-
         locked_distance = median(init_samples)
 
-        # İlk birkaç örnek alındıktan sonra mesafe kilidi başlatılır. İlk
-        # frame'lerde detection ve KLT hâlâ oturduğu için median başlangıç daha
-        # stabil sonuç verir.
+        # İlk birkaç ölçümde median kullanmak detection ve KLT başlangıç
+        # titreşimlerinin mesafe kilidine doğrudan taşınmasını engeller.
         if len(init_samples) >= RANGE_INIT_SAMPLE_COUNT:
             track["range_locked_m"] = locked_distance
             track["range_last_frame"] = int(track.get("global_frame_index", 0))
@@ -904,37 +1153,32 @@ def calculate_track_distance(
         result = raw_result.copy()
         result["raw_distance"] = raw_distance
         result["distance"] = locked_distance
-
-        track["last_result"] = result
-        return result
+        return _cache_distance_result(track, result)
 
     current_frame = int(track.get("global_frame_index", 0))
     previous_frame = cast(int | None, track.get("range_last_frame"))
-
-    if previous_frame is None:
-        frame_delta = 1
-    else:
-        frame_delta = max(1, current_frame - previous_frame)
-
+    frame_delta = (
+        1 if previous_frame is None else max(1, current_frame - previous_frame)
+    )
     track["range_last_frame"] = current_frame
 
     dt_value = frame_delta / max(video_fps, 1.0)
-
     max_rate = max(
-        RANGE_MIN_RATE_M_PER_SEC, previous_locked * RANGE_RELATIVE_RATE_PER_SEC
+        RANGE_MIN_RATE_M_PER_SEC,
+        previous_locked * RANGE_RELATIVE_RATE_PER_SEC,
     )
     max_delta = max_rate * dt_value
 
     ratio = max(raw_distance, previous_locked) / max(
-        min(raw_distance, previous_locked), 1e-6
+        min(raw_distance, previous_locked),
+        1e-6,
     )
 
     if ratio > MAX_ACCEPTED_RAW_JUMP_RATIO:
         track["range_reject_count"] = int(track["range_reject_count"]) + 1
 
-        # Çok sayıda ham mesafe reddedilirse son ham örneklerin median değeriyle
-        # yeniden kilit kurulur. Bu durum genelde bbox şekli veya mesafe kaynağı
-        # değiştiğinde oluşur.
+        # Sürekli reddedilen ölçümler, hedef ölçeğinin gerçekten değiştiğini
+        # gösterebilir. Yeterli örnek varsa kilit yakın geçmiş medianına taşınır.
         if (
             int(track["range_reject_count"]) >= RANGE_REJECTS_TO_RELOCK
             and len(recent_raws) >= 5
@@ -948,36 +1192,35 @@ def calculate_track_distance(
     else:
         track["range_reject_count"] = 0
         alpha = distance_alpha_from_confidence(track, raw_result)
-
         candidate_distance = (
-            1.0 - alpha
-        ) * previous_locked + alpha * raw_distance
+            (1.0 - alpha) * previous_locked + alpha * raw_distance
+        )
 
     locked_distance = clamp_range_change(
-        previous_locked, candidate_distance, max_delta
+        previous_locked,
+        candidate_distance,
+        max_delta,
     )
-
-    # Mesafe fiziksel olarak geçerli aralıkta tutulur.
     locked_distance = max(
-        MIN_VALID_DISTANCE_M, min(MAX_SEA_DISTANCE_M, locked_distance)
+        MIN_VALID_DISTANCE_M,
+        min(MAX_SEA_DISTANCE_M, locked_distance),
     )
 
     track["range_locked_m"] = locked_distance
     range_history = cast(deque[float], track["range_history"])
     range_history.append(locked_distance)
 
-    if len(range_history) >= 5:
-        stable_distance = 0.85 * locked_distance + 0.15 * median(range_history)
-    else:
-        stable_distance = locked_distance
+    stable_distance = (
+        0.85 * locked_distance + 0.15 * median(range_history)
+        if len(range_history) >= 5
+        else locked_distance
+    )
 
     result = raw_result.copy()
     result["raw_distance"] = raw_distance
     result["distance"] = stable_distance
 
-    track["last_result"] = result
-
-    return result
+    return _cache_distance_result(track, result)
 
 
 def any_track_near_bottom(tracks: TrackMap) -> bool:
