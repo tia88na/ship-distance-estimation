@@ -1,25 +1,24 @@
-import math
+"""RGB ve termal video akışlarını çalıştıran uygulama giriş noktası."""
+
 from pathlib import Path
 
-from config import AppConfig
 import cv2
-import numpy as np
+
+from config import AppConfig
+from distance_butterfly_api import DistanceButterflyApi
+from distance_hl_api import DistanceHlApi
 from sensor_reader import load_sensor_csv
 from video_processor import create_stream_state, process_stream_frame
 from visualizer import draw_stream_output, make_side_by_side
 
 
-# PyTorch kullanılabiliyorsa YOLO çıkarımı GPU üzerinde çalıştırılır.
-# CUDA yoksa kod otomatik olarak CPU moduna düşer.
 try:
     import torch
 
     CUDA_AVAILABLE = torch.cuda.is_available()
-except Exception:
+except (ImportError, RuntimeError):
     CUDA_AVAILABLE = False
 
-# Ultralytics YOLO modeli opsiyonel bağımlılık olarak kontrol edilir.
-# Paket kurulu değilse program kullanıcıya kurulum bilgisini vererek durur.
 try:
     from ultralytics import YOLO
 
@@ -28,344 +27,37 @@ except ImportError:
     YOLO_AVAILABLE = False
 
 
-# Proje ayarları Python kodunun içine sabit yazılmak yerine config.yaml
-# dosyasından okunur. Böylece kayıt yolu, kamera yüksekliği ve model yolu
-# kullanıcıya göre dışarıdan değiştirilebilir.
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
 CONFIG = AppConfig.from_yaml(CONFIG_PATH)
 
-RECORD_NAME = CONFIG.record.name
-RECORD_ROOT = CONFIG.record.root
-
 RGB_VIDEO_PATH = CONFIG.paths.rgb_video
 THERMAL_VIDEO_PATH = CONFIG.paths.thermal_video
-VIDEO_PATH = RGB_VIDEO_PATH
 CSV_PATH = CONFIG.paths.sensor_csv
-
 OUTPUT_DIR = CONFIG.paths.output_dir
-OUTPUT_VIDEO_NAME = f"{RECORD_NAME}_rgb_thermal_clean_independent_distance.mp4"
-
-# Çalışma zamanı seçenekleri. Bu değerler video çıktısı alma, pencere gösterme
-# ve debug amaçlı çizimlerin açılıp kapatılmasını kontrol eder.
-SAVE_OUTPUT_VIDEO = True
-SHOW_WINDOW = True
-SHOW_TRACK_DETAILS = False
-DRAW_HORIZON_LINE = False
-
-# Ufuk çizgisi, kamera tilt bilgisine göre tahmin edilir. Bu katsayılar
-# ufuk çizgisinin ani sıçramasını engellemek için yumuşatma hızını belirler.
-MANUAL_HORIZON_BIAS_DEG = 0.0
-HORIZON_TILT_ONLY_EMA_STABLE = 0.12
-HORIZON_TILT_ONLY_EMA_MOVING = 0.28
-HORIZON_TILT_ONLY_MAX_STEP_STABLE_PX = 1.2
-HORIZON_TILT_ONLY_MAX_STEP_MOVING_PX = 9.0
-
-# İşleme çözünürlüğü sabit tutulur. RGB ve termal görüntüler bu boyuta göre
-# işlenir, çizilir ve çıktı videosuna yazılır.
-PROCESS_WIDTH = 1280
-PROCESS_HEIGHT = 720
-
-CX = PROCESS_WIDTH / 2.0
-CY = PROCESS_HEIGHT / 2.0
-
-# Kamera yüksekliği mesafe hesabında doğrudan kullanılır. Bu değer config.yaml
-# içinden okunur çünkü sahadan sahaya değişebilir.
-CAMERA_HEIGHT_M = CONFIG.camera.height_m
-
-# RGB ve termal kamera için varsayılan görüş açısı değerleri. CSV içinde FOV
-# bilgisi yoksa veya geçersizse bu değerler kullanılır.
-DEFAULT_FOV_H_DEG = 65.7
-DEFAULT_FOV_V_DEG = 39.9
-DEFAULT_THERMAL_FOV_H_DEG = 32.4
-DEFAULT_THERMAL_FOV_V_DEG = 24.6
-TILT_ZERO_HORIZON_DEG = 90.0
-
-# Dünya eğriliği ve atmosferik kırılma etkisi, uzak deniz mesafesi hesabında
-# ufuk çizgisini daha gerçekçi modellemek için kullanılır.
-EARTH_RADIUS_M = 6371000.0
-REFRACTION_K = 0.13
-EFFECTIVE_EARTH_RADIUS_M = EARTH_RADIUS_M / (1.0 - REFRACTION_K)
-
-HORIZON_DIP_RAD = math.sqrt(2.0 * CAMERA_HEIGHT_M / EFFECTIVE_EARTH_RADIUS_M)
-MAX_SEA_DISTANCE_M = math.sqrt(
-    2.0 * EFFECTIVE_EARTH_RADIUS_M * CAMERA_HEIGHT_M
+OUTPUT_VIDEO_NAME = (
+    f"{CONFIG.record.name}_rgb_thermal_clean_independent_distance.mp4"
 )
 
-# Ufuk çizgisine çok yakın noktalar için mesafe hesabı güvenilir değildir.
-# Bu eşikler geçersiz veya fiziksel olarak anlamsız mesafeleri filtreler.
-MIN_BETA_RAD = math.radians(0.015)
-MIN_VALID_DISTANCE_M = 5.0
+PROCESS_WIDTH = 1280
+PROCESS_HEIGHT = 720
+CAMERA_HEIGHT_M = CONFIG.camera.height_m
 
-# YOLO modeli ve tespit eşikleri. Model yolu config.yaml içinden alınır.
+SAVE_OUTPUT_VIDEO = True
+SHOW_WINDOW = True
+
 YOLO_MODEL_PATH = CONFIG.model.yolo_path
-YOLO_CONF_FULL = 0.35
-YOLO_CONF_DEEP = 0.28
-YOLO_IOU_THRES = 0.50
-YOLO_IMGSZ_FULL = 960
-YOLO_IMGSZ_DEEP = 1280
-
-# Termal görüntülerde kontrast ve detay farklı olduğu için RGB'den ayrı
-# confidence ve görüntü boyutu değerleri kullanılır.
-THERMAL_YOLO_CONF_FULL = 0.30
-THERMAL_YOLO_CONF_DEEP = 0.22
-THERMAL_YOLO_IMGSZ_FULL = 1280
-THERMAL_YOLO_IMGSZ_DEEP = 1280
-THERMAL_BLOB_DETECTION_ENABLED = False
-THERMAL_BLOB_MIN_AREA = 350
-THERMAL_BLOB_MAX_AREA_RATIO = 0.08
-THERMAL_BLOB_MIN_ASPECT = 0.55
-THERMAL_BLOB_MAX_ASPECT = 14.0
-THERMAL_BLOB_BRIGHT_PERCENTILE = 94.0
-THERMAL_BLOB_DARK_PERCENTILE = 2.0
-THERMAL_BLOB_MIN_CONTRAST = 18.0
-THERMAL_DETECT_WHILE_MOVING = False
-
-# CUDA varsa YOLO GPU'da ve half precision ile çalıştırılır. CUDA yoksa CPU
-# kullanılır. Böylece aynı kod farklı makinelerde çalışabilir.
 YOLO_DEVICE = 0 if CUDA_AVAILABLE else "cpu"
-YOLO_HALF = True if CUDA_AVAILABLE else False
-
-# Tespit aralıkları tracking durumuna göre değişir. Nesne takip ediliyorsa
-# her karede YOLO çalıştırmak yerine belirli aralıklarla tespit yapılır.
-DETECT_INTERVAL_TRACKING = 6
-DETECT_INTERVAL_LOST_FULL = 3
-DETECT_INTERVAL_LOST_DEEP = 9
-DETECT_INTERVAL_BOTTOM_DEEP = 6
-
-# Track eşleştirme ve track yaşam süresi ayarları. Bu değerler yanlış track
-# üretimini ve eski tracklerin ekranda gereğinden fazla kalmasını engeller.
-TRACK_MATCH_SCORE_THRES = 0.15
-TRACK_MIN_AGE_TO_DISPLAY = 3
-TRACK_MIN_CONFIRMED_UPDATES = 2
-TRACK_MAX_MISSED_DETECTIONS = 6
-TRACK_MAX_STALE_FRAMES = 60
-TRACK_DRAW_MAX_STALE_FRAMES = 25
-
-# Bounding box ve confidence değerleri ani değişmesin diye yumuşatma
-# katsayıları kullanılır.
-BOX_ALPHA = 0.30
-CONF_ALPHA = 0.20
-
-# Mesafe hesabında kutu merkezi yerine su hattına yakın alt nokta kullanılır.
-# Çünkü geminin denizle temas ettiği nokta mesafe tahmini için daha anlamlıdır.
-WATERLINE_RATIO_NORMAL = 0.90
-WATERLINE_RATIO_ZOOM = 0.86
-WATER_HISTORY_LEN = 7
-
-# KLT optical flow ayarları. Bu ayarlar YOLO tespiti yapılmayan karelerde
-# nesne hareketini takip etmek için kullanılır.
-KLT_MAX_CORNERS = 120
-KLT_QUALITY_LEVEL = 0.01
-KLT_MIN_DISTANCE = 7
-KLT_BLOCK_SIZE = 7
-KLT_MIN_POINTS = 8
-KLT_MAX_STEP_PX = 80.0
-KLT_REINIT_EVERY = 12
-KLT_TOP_RATIO = 0.08
-KLT_BOTTOM_RATIO = 0.78
-KLT_SIDE_MARGIN_RATIO = 0.08
-
-# Ham mesafe ölçümleri kareden kareye zıplayabilir. Bu değerler mesafe
-# geçmişini tutar, ani sıçramaları sınırlar ve daha stabil çıktı üretir.
-RANGE_INIT_SAMPLE_COUNT = 4
-RANGE_HISTORY_WINDOW = 25
-RANGE_UPDATE_ALPHA_DETECTED = 0.20
-RANGE_UPDATE_ALPHA_KLT = 0.06
-MAX_ACCEPTED_RAW_JUMP_RATIO = 1.60
-RANGE_REJECTS_TO_RELOCK = 12
-RANGE_RELATIVE_RATE_PER_SEC = 0.10
-RANGE_MIN_RATE_M_PER_SEC = 2.0
-RECENT_RAW_WINDOW = 15
-
-# Kameranın kendi platformu veya çok yakın büyük nesneler tespit sonucu gibi
-# algılanmasın diye filtreleme eşikleri kullanılır.
-OWN_SHIP_BOTTOM_RATIO = 0.90
-OWN_SHIP_MIN_HEIGHT_RATIO = 0.30
-OWN_SHIP_MAX_AREA_RATIO = 0.40
-OWN_SHIP_NEAR_DISTANCE_M = 12.0
-OWN_SHIP_NEAR_BOTTOM_RATIO = 0.82
-
-# Global kamera hareketi, görüntüdeki genel optik akıştan tahmin edilir.
-# Bu bilgi pan/tilt/zoom hareketlerinde tracklerin dengeli kalmasına yardım eder.
-GLOBAL_MAX_CORNERS = 140
-GLOBAL_MIN_POINTS = 12
-GLOBAL_MAX_FLOW_PX = 150.0
-PAN_ACTIVE_FLOW_PX = 18.0
-ZOOM_SCALE_EPS = 0.0015
-ZOOM_ACTIVE_SCALE = 0.006
-
-# Ufuk tespitinde kullanılan görüntü işleme eşikleri. Ufuk çizgisi zayıf,
-# eğimli veya gürültülü görünüyorsa bu değerler güvenilirliği kontrol eder.
-HORIZON_BAND_RATIO = 0.14
-HORIZON_COLUMN_STEP = 24
-HORIZON_MIN_POINTS = 18
-HORIZON_MAX_SLOPE = 0.08
-HORIZON_FIT_RESIDUAL_PX = 2.8
-HORIZON_ROW_STRENGTH_MIN = 10.0
-HORIZON_PEAK_RATIO_MIN = 1.55
-HORIZON_REFINE_WINDOW = 10
-HORIZON_MIN_CONF = 0.42
-HORIZON_EMA_VISUAL = 0.035
-HORIZON_EMA_TILT = 0.018
-HORIZON_BIAS_EMA = 0.012
-HORIZON_DETECT_INTERVAL = 5
-HORIZON_VISUAL_HOLD_FRAMES = 140
-HORIZON_MEDIAN_WINDOW = 21
-HORIZON_MAX_VISUAL_JUMP_PX = 18.0
-HORIZON_MAX_STEP_STABLE_PX = 0.65
-HORIZON_MAX_STEP_MOVING_PX = 3.0
-HORIZON_FLOW_ALPHA = 0.18
-
-# Aynı gemiye ait birden fazla YOLO kutusu oluşursa bunları birleştirmek için
-# IoU, iç içelik, yatay örtüşme ve merkez uzaklığı eşikleri kullanılır.
-MERGE_IOU_THRES = 0.22
-MERGE_INSIDE_THRES = 0.55
-MERGE_HORIZONTAL_OVERLAP_THRES = 0.35
-MERGE_VERTICAL_GAP_PX = 180
-MERGE_CENTER_DISTANCE_RATIO = 0.82
-
-PANEL_HEIGHT = 158
+YOLO_HALF = CUDA_AVAILABLE
 
 
-def detect_horizon_visual(
-    gray: np.ndarray, center_y: float
-) -> dict[str, float] | None:
-    """Gri görüntü üzerinde görsel ufuk çizgisini tespit eder.
-
-    Fonksiyon, beklenen ufuk konumunun çevresinde güçlü yatay kenarları arar.
-    Bulunan kenar noktaları sütunlar boyunca örneklenir ve ufuk çizgisi için
-    basit bir doğru uydurma işlemi uygulanır.
-
-    Args:
-        gray: Ufuk tespiti için kullanılan gri seviye görüntü.
-        center_y: Ufuk çizgisinin beklenen dikey piksel konumu.
-
-    Returns:
-        Ufuk çizgisinin y konumu, eğimi ve güven skorunu içeren sözlük.
-        Güvenilir ufuk bulunamazsa None döner.
-    """
-    half = int(PROCESS_HEIGHT * HORIZON_BAND_RATIO)
-    y1 = int(max(4, center_y - half))
-    y2 = int(min(PROCESS_HEIGHT - 4, center_y + half))
-
-    if y2 - y1 < 24:
-        return None
-
-    # Ufuk araması sadece beklenen dar bant içinde yapılır. Böylece deniz
-    # yüzeyi, gemiler veya görüntünün alt kısmındaki güçlü kenarlar ufuk
-    # tespitini gereksiz yere etkilemez.
-    band = cv2.GaussianBlur(gray[y1:y2], (5, 5), 0)
-    grad = np.abs(cv2.Sobel(band, cv2.CV_32F, 0, 1, ksize=3))
-
-    # Her satırdaki ortalama dikey gradyan alınarak en güçlü yatay kenar
-    # adayının bulunduğu satır tespit edilir.
-    profile = grad.mean(axis=1)
-    kernel = np.ones(5, dtype=np.float64) / 5.0
-    profile = np.convolve(profile, kernel, mode="same")
-
-    peak_idx = int(np.argmax(profile))
-    peak_value = float(profile[peak_idx])
-    med_value = float(np.median(profile))
-
-    ratio = peak_value / max(med_value, 1e-6)
-
-    if ratio < HORIZON_PEAK_RATIO_MIN:
-        return None
-
-    if peak_value < HORIZON_ROW_STRENGTH_MIN:
-        return None
-
-    sub_offset = 0.0
-
-    # En güçlü satırın komşularına bakılarak alt-piksel seviyesinde daha hassas
-    # bir ufuk konumu elde edilir.
-    if 0 < peak_idx < len(profile) - 1:
-        left = float(profile[peak_idx - 1])
-        right = float(profile[peak_idx + 1])
-        denom = left - 2.0 * peak_value + right
-
-        if abs(denom) > 1e-9:
-            sub_offset = 0.5 * (left - right) / denom
-            sub_offset = max(-1.0, min(1.0, sub_offset))
-
-    row0 = y1 + peak_idx + sub_offset
-
-    # Güven skoru, en güçlü kenarın çevredeki ortalama kenar gücünden ne kadar
-    # ayrıştığına göre hesaplanır.
-    conf = max(0.0, min(1.0, (ratio - 1.2) / 1.5))
-
-    lo = max(0, peak_idx - HORIZON_REFINE_WINDOW)
-    hi = min(len(profile), peak_idx + HORIZON_REFINE_WINDOW + 1)
-
-    xs: list[float] = []
-    ys: list[float] = []
-    ws: list[float] = []
-
-    # Ufuk çizgisi tek bir satırdan değil, farklı sütunlardan alınan güçlü
-    # kenar noktalarından tahmin edilir. Bu sayede eğimli ufuklar da yakalanır.
-    for x_value in range(8, PROCESS_WIDTH - 8, HORIZON_COLUMN_STEP):
-        column = grad[lo:hi, x_value - 2 : x_value + 3].mean(axis=1)
-        j_value = int(np.argmax(column))
-        strength = float(column[j_value])
-
-        if strength < max(4.0, 0.30 * peak_value):
-            continue
-
-        xs.append(float(x_value))
-        ys.append(float(y1 + lo + j_value))
-        ws.append(strength)
-
-    if len(xs) < HORIZON_MIN_POINTS:
-        return {"y": float(row0), "slope": 0.0, "conf": conf * 0.7}
-
-    px = np.array(xs)
-    py = np.array(ys)
-    pw = np.array(ws)
-
-    total_points = len(px)
-    slope = 0.0
-    intercept = float(row0)
-    fit_ok = True
-
-    # Aykırı noktalar birkaç kez elenir. Böylece gemi, dalga veya yansıma gibi
-    # güçlü ama ufuk olmayan kenarlar doğru uydurma sonucunu bozmaz.
-    for _ in range(3):
-        if len(px) < HORIZON_MIN_POINTS:
-            fit_ok = False
-            break
-
-        slope, intercept = np.polyfit(px, py, 1, w=pw)
-        residual = np.abs(py - (slope * px + intercept))
-        inlier = residual < HORIZON_FIT_RESIDUAL_PX
-
-        if int(np.sum(inlier)) < HORIZON_MIN_POINTS:
-            fit_ok = False
-            break
-
-        px = px[inlier]
-        py = py[inlier]
-        pw = pw[inlier]
-
-    if not fit_ok or abs(slope) > HORIZON_MAX_SLOPE:
-        return {"y": float(row0), "slope": 0.0, "conf": conf * 0.7}
-
-    inlier_frac = len(px) / max(1, total_points)
-    conf = conf * (0.5 + 0.5 * inlier_frac)
-
-    return {
-        "y": float(slope * CX + intercept),
-        "slope": float(slope),
-        "conf": float(conf),
-    }
+def get_video_fps(capture: cv2.VideoCapture, fallback: float = 25.0) -> float:
+    """Geçerli video FPS değerini döndürür."""
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    return fps if fps > 1.0 else fallback
 
 
 def main() -> None:
-    """RGB ve termal gemi mesafe tahmin hattını çalıştırır.
-
-    Bu fonksiyon proje ayarlarını yükler, RGB ve termal video akışlarını açar,
-    sensör verilerini okur, YOLO modelini başlatır ve kare işleme döngüsünü
-    çalıştırır.
-    """
+    """RGB ve termal tespit, takip ve mesafe hattını çalıştırır."""
     if not YOLO_AVAILABLE:
         print("Ultralytics kurulu degil.")
         print("Kurulum: pip install ultralytics")
@@ -382,8 +74,7 @@ def main() -> None:
         print(f"Thermal video bulunamadi: {THERMAL_VIDEO_PATH}")
         return
 
-    # RGB ve termal kanal için aynı CSV dosyasından sensör verileri okunur.
-    # Kanal parametresi, ilgili FOV/tilt/zoom kolonlarını seçmek için kullanılır.
+    # Her kanal için kendi sensör satırları kullanılır.
     rgb_sensor_rows = load_sensor_csv(CSV_PATH, channel="rgb")
     thermal_sensor_rows = load_sensor_csv(CSV_PATH, channel="thermal")
 
@@ -391,11 +82,10 @@ def main() -> None:
     model = YOLO(YOLO_MODEL_PATH)
     print("YOLO modeli hazir.")
     print(f"Device: {YOLO_DEVICE} | Half: {YOLO_HALF}")
-    print(
-        f"Kamera yuksekligi: {CAMERA_HEIGHT_M} m | "
-        f"Ufuk cukurlugu: {math.degrees(HORIZON_DIP_RAD):.4f} deg | "
-        f"Maks. deniz mesafesi: {MAX_SEA_DISTANCE_M / 1000.0:.2f} km"
-    )
+
+    # İki mesafe yöntemi bir kez oluşturulur ve bütün karelerde yeniden kullanılır.
+    distance_hl_api = DistanceHlApi()
+    distance_butterfly_api = DistanceButterflyApi()
 
     rgb_cap = cv2.VideoCapture(str(rgb_file))
     thermal_cap = cv2.VideoCapture(str(thermal_file))
@@ -409,28 +99,13 @@ def main() -> None:
         rgb_cap.release()
         return
 
-    rgb_fps = rgb_cap.get(cv2.CAP_PROP_FPS)
-    thermal_fps = thermal_cap.get(cv2.CAP_PROP_FPS)
+    video_fps = get_video_fps(rgb_cap)
 
-    # Bazı video dosyalarında FPS bilgisi eksik veya hatalı gelebilir.
-    # Bu durumda güvenli varsayılan değer kullanılır.
-    if rgb_fps is None or rgb_fps <= 1:
-        rgb_fps = 25.0
+    output_video_path = Path(OUTPUT_DIR) / OUTPUT_VIDEO_NAME
+    writer: cv2.VideoWriter | None = None
 
-    if thermal_fps is None or thermal_fps <= 1:
-        thermal_fps = rgb_fps
-
-    video_fps = rgb_fps
-
-    output_dir = Path(OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    output_video_path = output_dir / OUTPUT_VIDEO_NAME
-
-    writer = None
-
-    # İki kanal yan yana yazıldığı için çıktı video genişliği iki kat alınır.
     if SAVE_OUTPUT_VIDEO:
+        output_video_path.parent.mkdir(parents=True, exist_ok=True)
         writer = cv2.VideoWriter(
             str(output_video_path),
             cv2.VideoWriter_fourcc(*"mp4v"),
@@ -438,13 +113,12 @@ def main() -> None:
             (PROCESS_WIDTH * 2, PROCESS_HEIGHT),
         )
 
-    window_name = "RGB + THERMAL HORIZON-LOCKED DISTANCE"
+    window_name = "RGB + THERMAL DISTANCE"
 
     if SHOW_WINDOW:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-    # RGB ve termal kanal ayrı state yapılarıyla takip edilir. Böylece her
-    # kanalın track, horizon ve sensör geçmişi birbirinden bağımsız kalır.
+    # RGB ve termal akışların takip geçmişleri birbirinden bağımsız tutulur.
     rgb_state = create_stream_state("RGB", "rgb")
     thermal_state = create_stream_state("THERMAL", "thermal")
 
@@ -455,99 +129,104 @@ def main() -> None:
     print(f"RGB     : {RGB_VIDEO_PATH}")
     print(f"Thermal : {THERMAL_VIDEO_PATH}")
     print(f"CSV     : {CSV_PATH}")
-    print(f"Output  : {output_video_path}")
+
+    if SAVE_OUTPUT_VIDEO:
+        print(f"Output  : {output_video_path}")
+
     print("Cikis: q")
 
-    while True:
-        rgb_ret, rgb_frame = rgb_cap.read()
-        thermal_ret, thermal_frame = thermal_cap.read()
+    try:
+        while True:
+            rgb_ret, rgb_frame = rgb_cap.read()
+            thermal_ret, thermal_frame = thermal_cap.read()
 
-        if not rgb_ret and not thermal_ret:
-            break
-
-        if not rgb_ret:
-            rgb_frame = None
-
-        if not thermal_ret:
-            thermal_frame = None
-
-        current_tick = cv2.getTickCount()
-        fps = cv2.getTickFrequency() / max(current_tick - previous_tick, 1)
-        previous_tick = current_tick
-
-        # Her karede RGB ve termal görüntüler ayrı ayrı işlenir. Bu fonksiyon
-        # tespit, takip, ufuk güncelleme ve mesafe hesabı adımlarını yürütür.
-        rgb_output, rgb_moving = process_stream_frame(
-            rgb_frame,
-            rgb_state,
-            rgb_sensor_rows,
-            model,
-            frame_index,
-            video_fps,
-        )
-        thermal_output, thermal_moving = process_stream_frame(
-            thermal_frame,
-            thermal_state,
-            thermal_sensor_rows,
-            model,
-            frame_index,
-            video_fps,
-        )
-
-        # İşlenen karelerin üzerine track kutuları, mesafe bilgileri ve kanal
-        # durum bilgileri çizilir.
-        draw_stream_output(
-            rgb_output,
-            rgb_state,
-            rgb_sensor_rows,
-            fps,
-            frame_index,
-            video_fps,
-            rgb_moving,
-        )
-        draw_stream_output(
-            thermal_output,
-            thermal_state,
-            thermal_sensor_rows,
-            fps,
-            frame_index,
-            video_fps,
-            thermal_moving,
-        )
-
-        # RGB ve termal çıktı tek ekranda karşılaştırılabilsin diye yan yana
-        # birleştirilir.
-        combined = make_side_by_side(rgb_output, thermal_output)
-
-        if writer is not None:
-            writer.write(combined)
-
-        if SHOW_WINDOW:
-            cv2.imshow(window_name, combined)
-
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == ord("q"):
+            if not rgb_ret and not thermal_ret:
                 break
-        elif frame_index % 200 == 0:
-            print(
-                f"frame={frame_index} | "
-                f"rgb_tracks={len(rgb_state['tracks'])} | "
-                f"thermal_tracks={len(thermal_state['tracks'])} | "
-                f"rgb_mode={rgb_state['mode']} | "
-                f"thermal_mode={thermal_state['mode']}"
+
+            if not rgb_ret:
+                rgb_frame = None
+
+            if not thermal_ret:
+                thermal_frame = None
+
+            current_tick = cv2.getTickCount()
+            fps = cv2.getTickFrequency() / max(
+                current_tick - previous_tick,
+                1,
+            )
+            previous_tick = current_tick
+
+            # API nesneleri ve kamera yüksekliği takip katmanına iletilir.
+            rgb_output, rgb_moving = process_stream_frame(
+                frame=rgb_frame,
+                stream_state=rgb_state,
+                sensor_rows=rgb_sensor_rows,
+                model=model,
+                frame_index=frame_index,
+                video_fps=video_fps,
+                distance_hl_api=distance_hl_api,
+                distance_butterfly_api=distance_butterfly_api,
+                camera_height_m=CAMERA_HEIGHT_M,
+            )
+            thermal_output, thermal_moving = process_stream_frame(
+                frame=thermal_frame,
+                stream_state=thermal_state,
+                sensor_rows=thermal_sensor_rows,
+                model=model,
+                frame_index=frame_index,
+                video_fps=video_fps,
+                distance_hl_api=distance_hl_api,
+                distance_butterfly_api=distance_butterfly_api,
+                camera_height_m=CAMERA_HEIGHT_M,
             )
 
-        frame_index += 1
+            draw_stream_output(
+                rgb_output,
+                rgb_state,
+                rgb_sensor_rows,
+                fps,
+                frame_index,
+                video_fps,
+                rgb_moving,
+            )
+            draw_stream_output(
+                thermal_output,
+                thermal_state,
+                thermal_sensor_rows,
+                fps,
+                frame_index,
+                video_fps,
+                thermal_moving,
+            )
 
-    rgb_cap.release()
-    thermal_cap.release()
+            combined = make_side_by_side(rgb_output, thermal_output)
 
-    if writer is not None:
-        writer.release()
+            if writer is not None:
+                writer.write(combined)
 
-    if SHOW_WINDOW:
-        cv2.destroyAllWindows()
+            if SHOW_WINDOW:
+                cv2.imshow(window_name, combined)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            elif frame_index % 200 == 0:
+                print(
+                    f"frame={frame_index} | "
+                    f"rgb_tracks={len(rgb_state['tracks'])} | "
+                    f"thermal_tracks={len(thermal_state['tracks'])} | "
+                    f"rgb_mode={rgb_state['mode']} | "
+                    f"thermal_mode={thermal_state['mode']}"
+                )
+
+            frame_index += 1
+    finally:
+        rgb_cap.release()
+        thermal_cap.release()
+
+        if writer is not None:
+            writer.release()
+
+        if SHOW_WINDOW:
+            cv2.destroyAllWindows()
 
     print("Bitti.")
 
