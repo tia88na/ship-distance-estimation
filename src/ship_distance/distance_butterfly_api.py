@@ -50,7 +50,7 @@ class DistanceButterflyApi:
     """BBox piksel boyutu ve FOV değerlerinden yaklaşık mesafe hesaplar."""
 
     def __init__(
-        self,
+    self: DistanceButterflyApi,
         min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
         max_distance_m: float = DEFAULT_MAX_DISTANCE_M,
         ship_length_m: float = DEFAULT_SHIP_LENGTH_M,
@@ -84,7 +84,7 @@ class DistanceButterflyApi:
         self.ship_height_m = float(ship_height_m)
 
     def calc_distance(
-        self,
+    self: DistanceButterflyApi,
         track_id: int,
         box: Box,
         image_width: int,
