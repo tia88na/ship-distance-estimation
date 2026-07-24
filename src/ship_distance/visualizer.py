@@ -1,10 +1,4 @@
-"""Video çıktısı üzerine track, mesafe etiketi ve bilgi paneli çizim yardımcıları.
-
-Bu dosya RGB ve termal akışlardan gelen işlenmiş frame'lerin görselleştirme
-katmanını yönetir. Track kutuları, su hattı noktaları, mesafe yazıları, ufuk
-çizgisi, üst bilgi paneli ve iki görüntünün yan yana birleştirilmesi burada
-yapılır.
-"""
+"""RGB/termal çıktıların track, mesafe, ufuk ve bilgi paneli çizimleri."""
 
 import math
 from pathlib import Path
@@ -22,7 +16,6 @@ from geometry import (
 )
 import numpy as np
 from sensor_reader import SensorRow, get_sensor_for_time
-from tracker import calculate_track_distance
 
 
 Rect: TypeAlias = tuple[int, int, int, int]
@@ -33,12 +26,16 @@ TrackMap: TypeAlias = dict[int, Track]
 HorizonState: TypeAlias = dict[str, object]
 StreamState: TypeAlias = dict[str, object]
 
+# Runtime display metadata comes from the same project configuration as main.
+# Keep configuration reads here limited to values that are actually rendered.
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
 CONFIG = AppConfig.from_yaml(CONFIG_PATH)
 
 RECORD_NAME = CONFIG.record.name
 CAMERA_HEIGHT_M = CONFIG.camera.height_m
 
+# Display-only horizon limit. This does not perform per-track distance estimation.
+# The value is used when a target is reported at/beyond the visible horizon.
 EARTH_RADIUS_M = 6_371_000.0
 REFRACTION_FACTOR = 7.0 / 6.0
 EFFECTIVE_EARTH_RADIUS_M = EARTH_RADIUS_M * REFRACTION_FACTOR
@@ -46,11 +43,8 @@ MAX_SEA_DISTANCE_M = math.sqrt(
     2.0 * EFFECTIVE_EARTH_RADIUS_M * CAMERA_HEIGHT_M
 )
 
-DEFAULT_FOV_H_DEG = CONFIG.camera.rgb_fov_h_deg
-DEFAULT_FOV_V_DEG = CONFIG.camera.rgb_fov_v_deg
-DEFAULT_THERMAL_FOV_H_DEG = CONFIG.camera.thermal_fov_h_deg
-DEFAULT_THERMAL_FOV_V_DEG = CONFIG.camera.thermal_fov_v_deg
-
+# Visualization feature flags and minimum track quality required for drawing.
+# They affect only what is rendered, not tracking or distance calculations.
 SHOW_TRACK_DETAILS = False
 DRAW_HORIZON_LINE = False
 TRACK_MIN_AGE_TO_DISPLAY = 3
@@ -60,19 +54,38 @@ TRACK_DRAW_MAX_STALE_FRAMES = 25
 PANEL_HEIGHT = 158
 
 
+def get_display_distance_result(track: Track) -> dict[str, object]:
+    """Return the cached tracker result in the exact form needed for drawing."""
+
+    # Distance calculation belongs to tracker.py.  The visualizer only consumes
+    # the already-computed result so drawing a frame can never trigger estimation.
+    cached = track.get("last_result")
+
+    if not isinstance(cached, dict):
+        return {
+            "valid": False,
+            "reason": "distance_not_calculated",
+            "distance": None,
+            "raw_distance": None,
+            "distance_source": "none",
+        }
+
+    # The thermal guard may adjust track["distance"] after tracker cached the raw
+    # result.  Copy before overriding so visualization never mutates tracker state.
+    result = cached.copy()
+    current_distance = track.get("distance")
+
+    if result.get("valid") and isinstance(current_distance, int | float):
+        result["distance"] = float(current_distance)
+
+    return result
+
+
+# --- Label layout helpers ----------------------------------------------------
 def measure_text(
     text: str, scale: float, thickness: int = 1
 ) -> tuple[int, int]:
-    """OpenCV yazısının piksel cinsinden genişlik ve yüksekliğini ölçer.
-
-    Args:
-        text: Ölçülecek metin.
-        scale: OpenCV font ölçeği.
-        thickness: Yazı kalınlığı.
-
-    Returns:
-        Metnin genişliği ve baseline dahil yüksekliği.
-    """
+    """OpenCV metninin baseline dahil piksel boyutunu döndürür."""
     size, base = cv2.getTextSize(
         text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
     )
@@ -81,15 +94,7 @@ def measure_text(
 
 
 def rects_overlap(rect_a: Rect, rect_b: Rect) -> bool:
-    """İki dikdörtgenin çakışıp çakışmadığını kontrol eder.
-
-    Args:
-        rect_a: İlk dikdörtgen. Format: x1, y1, x2, y2.
-        rect_b: İkinci dikdörtgen. Format: x1, y1, x2, y2.
-
-    Returns:
-        Dikdörtgenler çakışıyorsa True, aksi halde False.
-    """
+    """İki ekran dikdörtgeninin çakışıp çakışmadığını döndürür."""
     ax1, ay1, ax2, ay2 = rect_a
     bx1, by1, bx2, by2 = rect_b
 
@@ -99,22 +104,7 @@ def rects_overlap(rect_a: Rect, rect_b: Rect) -> bool:
 def place_label(
     occupied: list[Rect], x_value: int, y_pref: int, width: int, height: int
 ) -> int:
-    """Etiket için ekranda mümkün olan en uygun y konumunu seçer.
-
-    Aynı bölgede birden fazla track etiketi varsa yazılar üst üste binebilir.
-    Bu fonksiyon önce tercih edilen y konumuna yakın adayları dener, çakışma
-    yoksa o konumu kullanır.
-
-    Args:
-        occupied: Daha önce yerleştirilen etiket dikdörtgenleri.
-        x_value: Etiketin sol başlangıç x koordinatı.
-        y_pref: Tercih edilen y koordinatı.
-        width: Etiket metninin genişliği.
-        height: Etiket metninin yüksekliği.
-
-    Returns:
-        Etiketin çizileceği y koordinatı.
-    """
+    """Çakışmayan bir etiket y-konumu seçer; uygun yer yoksa fallback kullanır."""
     step = height + 8
 
     # Önce tercih edilen konumun üst tarafı denenir.
@@ -162,17 +152,7 @@ def draw_text_bg(
     bg: Color = (0, 0, 0),
     thickness: int = 1,
 ) -> None:
-    """Frame üzerine arka plan kutulu metin çizer.
-
-    Args:
-        frame: Üzerine çizim yapılacak BGR frame.
-        text: Çizilecek metin.
-        org: Metnin sol-alt başlangıç koordinatı.
-        scale: OpenCV font ölçeği.
-        color: Yazı rengi.
-        bg: Arka plan kutu rengi.
-        thickness: Yazı kalınlığı.
-    """
+    """Okunabilirlik için dolu arka plan üzerinde metin çizer."""
     x_value, y_value = org
 
     # Metnin kaplayacağı alan hesaplanır.
@@ -204,13 +184,9 @@ def draw_text_bg(
     )
 
 
+# --- Overlay drawing ---------------------------------------------------------
 def draw_horizon_line(frame: np.ndarray, horizon_state: HorizonState) -> None:
-    """İstenirse tahmini ufuk çizgisini frame üzerine çizer.
-
-    Args:
-        frame: Üzerine çizim yapılacak BGR frame.
-        horizon_state: Güncel ufuk çizgisi durumu.
-    """
+    """Debug seçeneği açıksa tahmini ufuk çizgisini çizer."""
     if not DRAW_HORIZON_LINE:
         return
 
@@ -228,6 +204,8 @@ def draw_horizon_line(frame: np.ndarray, horizon_state: HorizonState) -> None:
     )
 
 
+# Track rendering deliberately consumes tracker state instead of recalculating it.
+# This keeps visualization side-effect free with respect to distance estimation.
 def draw_tracks(
     frame: np.ndarray,
     tracks: TrackMap,
@@ -235,15 +213,7 @@ def draw_tracks(
     horizon_state: HorizonState,
     video_fps: float,
 ) -> None:
-    """Aktif track kutularını, su hattı noktalarını ve mesafe etiketlerini çizer.
-
-    Args:
-        frame: Üzerine çizim yapılacak BGR frame.
-        tracks: Aktif track sözlüğü.
-        sensor_info: Mevcut frame'e karşılık gelen sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        video_fps: Video FPS değeri.
-    """
+    """Güvenilir track'leri bbox, water-point ve mesafe etiketiyle çizer."""
     occupied: list[Rect] = []
 
     # Yakındaki/öndeki objelerin etiketleri daha kontrollü yerleşsin diye
@@ -263,6 +233,8 @@ def draw_tracks(
             continue
 
         # Termal akışta daha sıkı çizim şartı uygulanır.
+        # Thermal detections require one extra confirmation step before display.
+        # This reduces flickering from short-lived low-confidence thermal fragments.
         if track.get("channel") == "thermal":
             if track.get("conf", 0.0) < THERMAL_YOLO_CONF_DEEP:
                 continue
@@ -279,9 +251,8 @@ def draw_tracks(
         if x2 <= x1 or y2 <= y1:
             continue
 
-        result = calculate_track_distance(
-            track, sensor_info, horizon_state, video_fps
-        )
+        # Distance was already calculated by tracker; drawing only reads it.
+        result = get_display_distance_result(track)
 
         water_x = int(round(track["water_x"]))
         water_y = int(round(track["water_y"]))
@@ -290,6 +261,8 @@ def draw_tracks(
         water_x = max(0, min(PROCESS_WIDTH - 1, water_x))
         water_y = max(0, min(PROCESS_HEIGHT - 1, water_y))
 
+        # "at_or_beyond_horizon" is visually distinct from a generic invalid result:
+        # the target may exist, but geometry cannot return a finite sea-surface range.
         at_horizon = (
             not result["valid"] and result["reason"] == "at_or_beyond_horizon"
         )
@@ -346,8 +319,8 @@ def draw_tracks(
             if result["valid"]:
                 detail = (
                     f"raw={format_distance(result['raw_distance'])} | "
-                    f"beta={result['beta_deg']:.3f}deg | "
-                    f"src={track['source']}"
+                    f"distance_src={result.get('distance_source', 'unknown')} | "
+                    f"det_src={track['source']}"
                 )
             else:
                 detail = (
@@ -375,6 +348,7 @@ def draw_tracks(
             )
 
 
+# --- Status panel ------------------------------------------------------------
 def draw_panel(
     frame: np.ndarray,
     sensor_info: SensorRow,
@@ -385,18 +359,7 @@ def draw_panel(
     mode: str,
     camera_moving: bool,
 ) -> None:
-    """Üst bilgi panelini frame üzerine çizer.
-
-    Args:
-        frame: Üzerine panel çizilecek BGR frame.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        fps: Anlık işlem FPS değeri.
-        video_second: Video içindeki saniye değeri.
-        track_count: Aktif track sayısı.
-        mode: Detection/tracking çalışma modu.
-        camera_moving: Kameranın hareket edip etmediği.
-    """
+    """Sensör, horizon, FPS ve tracking durumunu üst panelde gösterir."""
     fx_value, fy_value = focal_from_fov(
         sensor_info["fov_h"], sensor_info["fov_v"]
     )
@@ -418,7 +381,7 @@ def draw_panel(
     # Panelde gösterilecek satırlar tek listede tutulur.
     lines = [
         (
-            f"HORIZON-LOCKED DISTANCE | FPS={fps:.1f} | "
+            f"HL + BUTTERFLY DISTANCE | FPS={fps:.1f} | "
             f"t={video_second:.2f}s | record={RECORD_NAME}"
         ),
         (
@@ -434,7 +397,7 @@ def draw_panel(
         ),
         (
             f"tracks={track_count} | mode={mode} | cam={moving_text} | "
-            "tilt/FOV horizon only | spherical earth + refraction"
+            "HL geometry + bbox/FOV estimate | temporal tracking"
         ),
     ]
 
@@ -454,15 +417,9 @@ def draw_panel(
         y_value += 31
 
 
+# --- Frame normalization and stream composition ------------------------------
 def ensure_bgr_frame(frame: np.ndarray | None) -> np.ndarray | None:
-    """Frame'i BGR formatına çevirir.
-
-    Args:
-        frame: Gri, tek kanallı veya BGR formatlı frame.
-
-    Returns:
-        BGR formatlı frame veya frame yoksa None.
-    """
+    """Gri veya tek kanallı görüntüyü çizime uygun BGR biçimine çevirir."""
     if frame is None:
         return None
 
@@ -486,22 +443,14 @@ def draw_stream_output(
     video_fps: float,
     camera_moving: bool,
 ) -> None:
-    """Bir akışın tüm görsel çıktı katmanlarını frame üzerine çizer.
-
-    Args:
-        frame: Üzerine çizim yapılacak BGR frame.
-        stream_state: Akışa ait güncel state sözlüğü.
-        sensor_rows: CSV'den okunan sensör satırları.
-        fps: Anlık işlem FPS değeri.
-        frame_index: İşlenen frame'in sıra numarası.
-        video_fps: Video FPS değeri.
-        camera_moving: Kameranın hareket edip etmediği.
-    """
+    """Bir RGB/termal akış için tüm çizim katmanlarını sırayla uygular."""
     video_second = frame_index / video_fps
     sensor_info = stream_state["sensor_smooth"]
 
     # Henüz yumuşatılmış sensör değeri yoksa doğrudan CSV'den zaman karşılığı
     # sensör bilgisi alınır.
+    # A missing smoothed sensor value can occur before normal stream state is ready;
+    # use the timestamp-matched raw row only as a rendering fallback.
     if sensor_info is None:
         sensor_info = get_sensor_for_time(sensor_rows, video_second)
 
@@ -539,15 +488,7 @@ def draw_stream_output(
 def make_side_by_side(
     left_frame: np.ndarray | None, right_frame: np.ndarray | None
 ) -> np.ndarray:
-    """RGB ve termal frame'leri yan yana tek çıktı görüntüsünde birleştirir.
-
-    Args:
-        left_frame: Sol tarafta gösterilecek frame.
-        right_frame: Sağ tarafta gösterilecek frame.
-
-    Returns:
-        Yan yana birleştirilmiş çıktı frame'i.
-    """
+    """RGB ve termal frame'leri aynı boyutta yan yana birleştirir."""
     # Sol frame yoksa siyah placeholder görüntü kullanılır.
     if left_frame is None:
         left_frame = np.zeros(
