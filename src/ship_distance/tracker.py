@@ -1,15 +1,4 @@
-"""KLT tabanlı takip, kamera hareketi ve mesafe yumuşatma yardımcıları.
-
-Bu modül detection sonuçlarını track haline getirir; KLT optical flow, kamera
-hareketi, detection-track eşleştirme ve FOV değişimlerini yönetir.
-
-Mesafe hesabı iki bağımsız servis üzerinden yapılır:
-- DistanceHlApi, ufuk çizgisi ve su hattı geometrisini kullanır.
-- DistanceButterflyApi, bbox piksel boyutu ve FOV değerlerini kullanır.
-
-Tracker bu iki sonucu birleştirir ve kareler arasındaki ani mesafe değişimlerini
-sınırlandırır. Mesafe formülleri tracker içinde tekrar edilmez.
-"""
+"""KLT tracking, camera motion and HL/Butterfly distance fusion helpers."""
 
 from collections import deque
 import math
@@ -53,6 +42,8 @@ DistanceResult: TypeAlias = dict[str, object]
 
 CX = PROCESS_WIDTH / 2.0
 
+# --- Local KLT tracking ------------------------------------------------------
+# These values control feature density, point quality and reinitialization.
 KLT_MAX_CORNERS = 120
 KLT_QUALITY_LEVEL = 0.01
 KLT_MIN_DISTANCE = 7
@@ -64,10 +55,14 @@ KLT_TOP_RATIO = 0.08
 KLT_BOTTOM_RATIO = 0.78
 KLT_SIDE_MARGIN_RATIO = 0.08
 
+# --- Global camera motion ----------------------------------------------------
+# Background points are estimated independently from per-target KLT points.
 GLOBAL_MAX_CORNERS = 140
 GLOBAL_MIN_POINTS = 12
 GLOBAL_MAX_FLOW_PX = 150.0
 
+# --- Track lifecycle and matching -------------------------------------------
+# Matching combines IoU, horizontal overlap, center proximity and water_y.
 TRACK_MATCH_SCORE_THRES = 0.15
 TRACK_MIN_CONFIRMED_UPDATES = 2
 TRACK_MAX_MISSED_DETECTIONS = 6
@@ -78,6 +73,8 @@ BOX_ALPHA = 0.30
 CONF_ALPHA = 0.20
 WATER_HISTORY_LEN = 7
 
+# --- Temporal distance stabilization ----------------------------------------
+# Distance locking is intentionally slower than bbox tracking to suppress jumps.
 RANGE_INIT_SAMPLE_COUNT = 4
 RANGE_HISTORY_WINDOW = 25
 RANGE_UPDATE_ALPHA_DETECTED = 0.20
@@ -88,31 +85,21 @@ RANGE_RELATIVE_RATE_PER_SEC = 0.10
 RANGE_MIN_RATE_M_PER_SEC = 2.0
 RECENT_RAW_WINDOW = 15
 
+# --- Detection scheduling ----------------------------------------------------
+# YOLO runs periodically while KLT carries targets between detection frames.
 DETECT_INTERVAL_TRACKING = 6
 DETECT_INTERVAL_LOST_FULL = 3
 DETECT_INTERVAL_LOST_DEEP = 9
 DETECT_INTERVAL_BOTTOM_DEEP = 6
 
 
+# Global flow uses only background features; target motion must not bias camera motion.
 def estimate_global_motion(
     previous_gray: np.ndarray | None,
     current_gray: np.ndarray,
     tracks: TrackMap,
 ) -> tuple[float, float, bool]:
-    """Track dışındaki görüntü bölgelerinden global kamera hareketini hesaplar.
-
-    Kamera pan hareketi varsa tüm görüntü benzer yönde kayar. Bu fonksiyon
-    mevcut track kutularını maskeler ve kalan arka plan noktalarından median
-    optical flow değeri üretir.
-
-    Args:
-        previous_gray: Bir önceki gri frame.
-        current_gray: Mevcut gri frame.
-        tracks: Aktif track sözlüğü.
-
-    Returns:
-        x hareketi, y hareketi ve hareket tahmininin güvenilir olup olmadığı.
-    """
+    """Estimate background camera translation with KLT while masking active tracks."""
     if previous_gray is None:
         return 0.0, 0.0, False
 
@@ -173,6 +160,7 @@ def estimate_global_motion(
 
     # Median'dan fazla sapan noktalar outlier kabul edilip temizlenir.
     residual = np.sqrt((flow[:, 0] - dx_med) ** 2 + (flow[:, 1] - dy_med) ** 2)
+    # Robust residual threshold keeps the dominant camera flow while rejecting outliers.
     keep = residual < max(3.0, float(np.percentile(residual, 75)) + 3.0)
 
     if int(np.sum(keep)) < GLOBAL_MIN_POINTS:
@@ -191,34 +179,18 @@ def estimate_global_motion(
 def rescale_point(
     x_value: float, y_value: float, scale_x: float, scale_y: float
 ) -> Point:
-    """Bir noktayı görüntü merkezi etrafında FOV ölçeğine göre yeniden konumlar.
-
-    Args:
-        x_value: Noktanın x koordinatı.
-        y_value: Noktanın y koordinatı.
-        scale_x: Yatay ölçek katsayısı.
-        scale_y: Dikey ölçek katsayısı.
-
-    Returns:
-        Ölçeklenmiş x ve y koordinatı.
-    """
+    """Rescale one point around the image center after an FOV change."""
     return (CX + (x_value - CX) * scale_x, CY + (y_value - CY) * scale_y)
 
 
+# Zoom changes the pixel coordinate system even when the physical target does not move.
 def apply_fov_rescale(
     tracks: TrackMap,
     horizon_state: HorizonState,
     scale_x: float,
     scale_y: float,
 ) -> None:
-    """FOV/zoom değişiminde track ve ufuk bilgisini yeni ölçeğe uyarlar.
-
-    Args:
-        tracks: Aktif track sözlüğü.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        scale_x: Yatay FOV ölçek değişimi.
-        scale_y: Dikey FOV ölçek değişimi.
-    """
+    """Rescale tracks, horizon state and KLT points after zoom/FOV changes."""
     # Zoom değişince ufuk çizgisi görüntü merkezine göre yukarı/aşağı kayabilir.
     if horizon_state["y"] is not None:
         horizon_state["y"] = clamp_horizon_y(
@@ -279,15 +251,7 @@ def apply_fov_rescale(
 
 
 def init_klt_points(gray: np.ndarray, box: Box) -> np.ndarray | None:
-    """Track kutusu içinde KLT için takip edilecek köşe noktalarını başlatır.
-
-    Args:
-        gray: Gri seviye frame.
-        box: Track veya detection bounding box değeri.
-
-    Returns:
-        KLT noktaları veya yeterli nokta bulunamazsa None.
-    """
+    """Create KLT feature points inside the stable interior of a track bbox."""
     x1, y1, x2, y2 = visible_box(box)
 
     width = x2 - x1
@@ -331,21 +295,13 @@ def init_klt_points(gray: np.ndarray, box: Box) -> np.ndarray | None:
     return points.astype(np.float32)
 
 
+# Local KLT follows texture inside the vessel bbox between expensive YOLO runs.
 def apply_klt_to_track(
     track: Track,
     previous_gray: np.ndarray | None,
     current_gray: np.ndarray | None,
 ) -> bool:
-    """Tek bir track kutusunu KLT optical flow ile bir frame ileri taşır.
-
-    Args:
-        track: Güncellenecek track sözlüğü.
-        previous_gray: Bir önceki gri frame.
-        current_gray: Mevcut gri frame.
-
-    Returns:
-        KLT güncellemesi başarılıysa True.
-    """
+    """Advance one track by one frame using local KLT optical flow."""
     if previous_gray is None or current_gray is None:
         return False
 
@@ -388,6 +344,7 @@ def apply_klt_to_track(
 
     # Median'dan çok sapan noktalar track hareketini bozmasın diye elenir.
     residual = np.sqrt((flow[:, 0] - dx_med) ** 2 + (flow[:, 1] - dy_med) ** 2)
+    # Vessel-local flow is noisier than background flow, so this gate is more tolerant.
     keep = residual < max(8.0, float(np.percentile(residual, 75)) + 8.0)
 
     if int(np.sum(keep)) < KLT_MIN_POINTS:
@@ -414,12 +371,7 @@ def apply_klt_to_track(
 
 
 def update_track_velocity(track: Track, measured_box: Box) -> None:
-    """Detection ile ölçülen kutudan track velocity değerini günceller.
-
-    Args:
-        track: Güncellenecek track.
-        measured_box: Detection sonucundan gelen ölçülen kutu.
-    """
+    """Update smoothed bbox velocity from the newest detection."""
     previous = cast(Box | None, track.get("prev_measured_box"))
     current = tuple(float(value) for value in measured_box)
 
@@ -443,13 +395,7 @@ def update_track_velocity(track: Track, measured_box: Box) -> None:
 
 
 def shift_track_box(track: Track, dx_value: float, dy_value: float) -> None:
-    """Track kutusunu verilen x/y kayması kadar taşır.
-
-    Args:
-        track: Taşınacak track.
-        dx_value: x ekseni kayması.
-        dy_value: y ekseni kayması.
-    """
+    """Translate a track bbox by the supplied global motion."""
     x1, y1, x2, y2 = cast(Box, track["box"])
 
     track["box"] = clamp_track_box(
@@ -458,11 +404,7 @@ def shift_track_box(track: Track, dx_value: float, dy_value: float) -> None:
 
 
 def apply_velocity_prediction(track: Track) -> None:
-    """Detection/KLT yoksa track kutusunu velocity bilgisiyle tahmin eder.
-
-    Args:
-        track: Güncellenecek track.
-    """
+    """Predict bbox position when detection and KLT are unavailable."""
     velocity = cast(Box, track.get("velocity_box", (0.0, 0.0, 0.0, 0.0)))
     box = cast(Box, track["box"])
 
@@ -474,16 +416,7 @@ def apply_velocity_prediction(track: Track) -> None:
 def smooth_value(
     old_value: float | None, new_value: float, alpha: float
 ) -> float:
-    """Tek bir sayısal değeri ağırlıklı ortalama ile yumuşatır.
-
-    Args:
-        old_value: Önceki değer.
-        new_value: Yeni ölçülen değer.
-        alpha: Yeni değerin ağırlığı.
-
-    Returns:
-        Yumuşatılmış değer.
-    """
+    """EMA-style smoothing for one scalar value."""
     if old_value is None:
         return new_value
 
@@ -491,16 +424,7 @@ def smooth_value(
 
 
 def smooth_box(old_box: Box | None, new_box: Box, alpha: float) -> Box:
-    """Bounding box koordinatlarını ağırlıklı ortalama ile yumuşatır.
-
-    Args:
-        old_box: Önceki kutu.
-        new_box: Yeni ölçülen kutu.
-        alpha: Yeni kutunun ağırlığı.
-
-    Returns:
-        Yumuşatılmış bounding box.
-    """
+    """EMA-style smoothing for bbox coordinates."""
     if old_box is None:
         return tuple(float(value) for value in new_box)
 
@@ -510,12 +434,7 @@ def smooth_box(old_box: Box | None, new_box: Box, alpha: float) -> Box:
 
 
 def refresh_track_water_point(track: Track, sensor_info: SensorRow) -> None:
-    """Track kutusundan güncel su hattı noktasını hesaplar.
-
-    Args:
-        track: Güncellenecek track.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-    """
+    """Refresh the smoothed water point used by matching and drawing."""
     vx1, vy1, vx2, vy2 = visible_box(cast(Box, track["box"]))
 
     if vx2 <= vx1 or vy2 <= vy1:
@@ -527,10 +446,8 @@ def refresh_track_water_point(track: Track, sensor_info: SensorRow) -> None:
 
     water_hist = cast(deque[float], track["water_hist"])
 
-    # Su hattı y değeri median ile yumuşatılır. Bu, horizon-only mesafe
-    # hesabındaki zıplamayı azaltır. Hibrit hesap artık doğrudan box boyutunu da
-    # kullandığı için water point tek kaynak değildir, ama backward uyumluluk ve
-    # debug bilgisi için korunur.
+    # Median water_y is used by track matching and visualization.
+    # DistanceHlApi receives the current bbox and computes its own water point.
     water_hist.append(water_y)
     track["water_x"] = water_x
     track["water_y"] = median(water_hist)
@@ -539,17 +456,7 @@ def refresh_track_water_point(track: Track, sensor_info: SensorRow) -> None:
 def create_new_track(
     track_id: int, det: Detection, current_gray: np.ndarray, frame_index: int
 ) -> Track:
-    """Yeni detection sonucundan yeni track sözlüğü oluşturur.
-
-    Args:
-        track_id: Yeni track id değeri.
-        det: Detection sonucu.
-        current_gray: Mevcut gri frame.
-        frame_index: Mevcut frame index değeri.
-
-    Returns:
-        Yeni oluşturulmuş track sözlüğü.
-    """
+    """Create tracker state for a new detection."""
     det_box = cast(Box, det["box"])
     water_y = float(det["water_y"])
 
@@ -586,15 +493,7 @@ def create_new_track(
 
 
 def track_match_score(det: Detection, track: Track) -> float:
-    """Detection ve track arasındaki eşleşme skorunu hesaplar.
-
-    Args:
-        det: Yeni detection sonucu.
-        track: Mevcut track.
-
-    Returns:
-        0 ile 1 aralığına yakın eşleşme skoru.
-    """
+    """Score one detection-track pair using overlap, center and waterline proximity."""
     det_box = cast(Box, det["box"])
     track_box = box_to_int(cast(Box, track["box"]))
 
@@ -617,6 +516,7 @@ def track_match_score(det: Detection, track: Track) -> float:
     )
 
 
+# Main tracker pipeline: propagate -> match -> create/remove -> estimate distance.
 def update_tracks(
     detections: list[Detection],
     tracks: TrackMap,
@@ -635,29 +535,7 @@ def update_tracks(
     horizon_state: HorizonState,
     video_fps: float,
 ) -> tuple[TrackMap, int]:
-    """Aktif track listesini detection, KLT ve prediction ile günceller.
-
-    Args:
-        detections: Mevcut frame'de bulunan detection listesi.
-        tracks: Önceden aktif olan track sözlüğü.
-        next_track_id: Yeni track açılırsa kullanılacak id.
-        previous_gray: Bir önceki gri frame.
-        current_gray: Mevcut gri frame.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        detection_was_run: Bu frame'de detection çalışıp çalışmadığı.
-        frame_index: Mevcut frame index değeri.
-        skip_optical: Optical flow'un atlanıp atlanmayacağı.
-        global_flow: Global kamera hareketi.
-        global_flow_ok: Global kamera hareketinin güvenilir olup olmadığı.
-        distance_hl_api: Ufuk tabanlı mesafe API nesnesi.
-        distance_butterfly_api: Bbox tabanlı mesafe API nesnesi.
-        camera_height_m: Kameranın deniz seviyesinden yüksekliği.
-        horizon_state: Güncel ufuk çizgisi durumu.
-        video_fps: Mesafe değişim hızını hesaplamak için kullanılan FPS.
-
-    Returns:
-        Güncellenmiş track sözlüğü ve bir sonraki track id değeri.
-    """
+    """Update all tracks, match detections and calculate final distances."""
     gdx, gdy = global_flow
 
     for track in tracks.values():
@@ -703,6 +581,7 @@ def update_tracks(
                 candidates.append((score, det_idx, track_id))
 
     # En iyi eşleşmeler önce uygulanır.
+    # Greedy assignment starts from the strongest pair and prevents double matching.
     candidates.sort(reverse=True, key=lambda item: item[0])
 
     for _, det_idx, track_id in candidates:
@@ -793,16 +672,7 @@ def clamp_range_change(
     candidate_distance: float,
     max_delta: float,
 ) -> float:
-    """Mesafe değerinin tek frame'de izin verilen aralıktan fazla değişmesini önler.
-
-    Args:
-        previous_distance: Önceki kilitli mesafe.
-        candidate_distance: Yeni aday mesafe.
-        max_delta: İzin verilen maksimum değişim.
-
-    Returns:
-        Sınırlandırılmış mesafe değeri.
-    """
+    """Limit the maximum distance change allowed in one update."""
     if previous_distance is None:
         return candidate_distance
 
@@ -813,7 +683,7 @@ def clamp_range_change(
 
 
 def _sensor_float(sensor_info: SensorRow, key: str, default: float) -> float:
-    """Sensör sözlüğünden sonlu bir float değeri okur."""
+    """Read a finite sensor value or return a safe default."""
     value = sensor_info.get(key)
 
     if isinstance(value, int | float) and math.isfinite(float(value)):
@@ -828,7 +698,7 @@ def _weighted_log_average(
     second_distance: float,
     second_weight: float,
 ) -> float:
-    """Pozitif mesafeleri çarpansal hataya dayanıklı biçimde birleştirir."""
+    """Fuse positive distances in log space."""
     total_weight = max(first_weight + second_weight, 1e-6)
 
     return math.exp(
@@ -840,11 +710,13 @@ def _weighted_log_average(
     )
 
 
+# --- Distance fusion ---------------------------------------------------------
+# HL and Butterfly stay independent up to this function; only their outputs are fused.
 def _fuse_distance_results(
     horizontal_result: DistanceHlResult,
     butterfly_result: DistanceButterflyResult,
 ) -> DistanceResult:
-    """İki bağımsız API sonucunu tracker'ın kullandığı sözlüğe dönüştürür."""
+    """Fuse independent HL and Butterfly API results."""
     horizontal_distance = horizontal_result.distance_m
     butterfly_distance = butterfly_result.distance_m
 
@@ -853,7 +725,7 @@ def _fuse_distance_results(
     )
     butterfly_valid = butterfly_result.valid and butterfly_distance is not None
 
-    # Aday sonuçlar debug, termal guard ve görselleştirme için korunur.
+    # Keep both API candidates available for the thermal guard and diagnostics.
     base_result: DistanceResult = {
         "horizon_distance": horizontal_distance,
         "size_distance": butterfly_distance,
@@ -863,7 +735,6 @@ def _fuse_distance_results(
         "size_confidence": butterfly_result.confidence,
         "horizontal_confidence": horizontal_result.confidence,
         "butterfly_confidence": butterfly_result.confidence,
-        "beta_deg": 0.0,
     }
 
     if not horizontal_valid and not butterfly_valid:
@@ -909,6 +780,7 @@ def _fuse_distance_results(
     assert horizontal_distance is not None
     assert butterfly_distance is not None
 
+    # Ratio is scale-independent: 100 vs 200 m is treated like 1 vs 2 km.
     ratio = max(horizontal_distance, butterfly_distance) / max(
         min(horizontal_distance, butterfly_distance), 1.0
     )
@@ -929,9 +801,11 @@ def _fuse_distance_results(
             butterfly_weight = 0.62
             reason = "size_dominant_low_confidence"
         else:
-            horizontal_weight = 0.35
-            butterfly_weight = 0.65
-            reason = "hybrid_disagreement_low_confidence"
+            # A weak bbox estimate must not dominate a large disagreement.
+            # Favor HL here; the thermal guard can still apply its later correction.
+            horizontal_weight = 0.70
+            butterfly_weight = 0.30
+            reason = "horizon_dominant_low_butterfly_confidence"
     else:
         horizontal_weight = 0.35 * max(horizontal_result.confidence, 0.05)
         butterfly_weight = 0.65 * max(butterfly_result.confidence, 0.05)
@@ -971,7 +845,7 @@ def _calculate_raw_distance(
     distance_butterfly_api: DistanceButterflyApi,
     camera_height_m: float,
 ) -> DistanceResult:
-    """Güncel track girdileriyle iki mesafe API'sini ayrı ayrı çalıştırır."""
+    """Run both distance APIs on the current track bbox."""
     track_id = int(track.get("id", 0))
     box = cast(Box, track["box"])
 
@@ -1021,7 +895,7 @@ def _calculate_raw_distance(
 def _cache_distance_result(
     track: Track, result: DistanceResult
 ) -> DistanceResult:
-    """Mesafe sonucunu tracker, guard ve visualizer için ortak alanlara yazar."""
+    """Cache the final result and fields consumed by the thermal guard."""
     track["last_result"] = result
     track["distance_source"] = result.get("distance_source")
     track["distance_confidence"] = result.get("distance_confidence", 0.0)
@@ -1040,7 +914,7 @@ def _cache_distance_result(
 def distance_alpha_from_confidence(
     track: Track, raw_result: DistanceResult
 ) -> float:
-    """Ölçüm güvenine ve track güncelliğine göre smoothing katsayısı üretir."""
+    """Choose distance smoothing strength from confidence and track freshness."""
     confidence = float(raw_result.get("distance_confidence", 0.30))
 
     if int(track.get("frames_since_update", 0)) <= 2:
@@ -1052,52 +926,20 @@ def distance_alpha_from_confidence(
     return base_alpha * max(0.35, min(1.0, confidence / 0.55))
 
 
+# --- Temporal range filtering -----------------------------------------------
+# Raw fused distance is stabilized after API fusion, never inside either API.
 def calculate_track_distance(
     track: Track,
     sensor_info: SensorRow,
     horizon_state: HorizonState,
     video_fps: float,
-    distance_hl_api: DistanceHlApi | None = None,
-    distance_butterfly_api: DistanceButterflyApi | None = None,
-    camera_height_m: float | None = None,
+    distance_hl_api: DistanceHlApi,
+    distance_butterfly_api: DistanceButterflyApi,
+    camera_height_m: float,
 ) -> DistanceResult:
-    """Track mesafesini hesaplar, filtreler ve sonucu track üzerinde saklar.
+    """Calculate, stabilize and cache one track's distance."""
 
-    API parametreleri update_tracks tarafından verilir. Visualizer bu fonksiyonu
-    eski dört parametreli biçimde çağırdığında yeniden hesap yapmak yerine tracker
-    içinde önceden hesaplanan son sonuç döndürülür.
-    """
-    if (
-        distance_hl_api is None
-        or distance_butterfly_api is None
-        or camera_height_m is None
-    ):
-        cached = cast(DistanceResult | None, track.get("last_result"))
-
-        if cached is None:
-            return {
-                "valid": False,
-                "reason": "distance_not_calculated",
-                "distance": None,
-                "raw_distance": None,
-                "distance_source": "none",
-                "distance_confidence": 0.0,
-                "horizon_distance": None,
-                "size_distance": None,
-                "beta_deg": 0.0,
-            }
-
-        # Termal guard mesafeyi track alanında değiştirmiş olabilir. Görselleştirme
-        # çağrısında cache kopyalanır ve güncel track mesafesi sonuca yansıtılır.
-        current_distance = track.get("distance")
-
-        if cached.get("valid") and isinstance(current_distance, int | float):
-            displayed_result = cached.copy()
-            displayed_result["distance"] = float(current_distance)
-            return displayed_result
-
-        return cached
-
+    # Only tracker owns distance calculation. The visualizer consumes last_result.
     raw_result = _calculate_raw_distance(
         track=track,
         sensor_info=sensor_info,
@@ -1107,7 +949,7 @@ def calculate_track_distance(
         camera_height_m=camera_height_m,
     )
 
-    # Aday mesafeler termal guard ve debug çıktıları için hemen track'e yazılır.
+    # Publish current candidates before temporal filtering so the thermal guard can inspect them.
     track["distance_source"] = raw_result.get("distance_source")
     track["distance_confidence"] = raw_result.get("distance_confidence", 0.0)
     track["horizon_distance"] = raw_result.get("horizon_distance")
@@ -1129,6 +971,8 @@ def calculate_track_distance(
 
     raw_distance = float(raw_result["distance"])
     recent_raws = cast(deque[float], track["recent_raws"])
+    # Keep raw values even when a later jump gate rejects the current candidate.
+    # Sustained disagreement can then trigger a controlled re-lock.
     recent_raws.append(raw_distance)
 
     previous_locked = cast(float | None, track["range_locked_m"])
@@ -1166,6 +1010,7 @@ def calculate_track_distance(
         min(raw_distance, previous_locked), 1e-6
     )
 
+    # A one-frame jump is frozen; repeated jumps indicate a real scale/range change.
     if ratio > MAX_ACCEPTED_RAW_JUMP_RATIO:
         track["range_reject_count"] = int(track["range_reject_count"]) + 1
 
@@ -1199,6 +1044,7 @@ def calculate_track_distance(
     range_history = cast(deque[float], track["range_history"])
     range_history.append(locked_distance)
 
+    # Final median contribution damps small oscillations without replacing the rate-limited lock.
     stable_distance = (
         0.85 * locked_distance + 0.15 * median(range_history)
         if len(range_history) >= 5
@@ -1213,14 +1059,7 @@ def calculate_track_distance(
 
 
 def any_track_near_bottom(tracks: TrackMap) -> bool:
-    """Aktif track'lerden birinin görüntünün alt kısmına yakın olup olmadığını bakar.
-
-    Args:
-        tracks: Aktif track sözlüğü.
-
-    Returns:
-        Alt bölgeye yakın track varsa True.
-    """
+    """Return whether a visible track is close to the lower image region."""
     for track in tracks.values():
         if (
             int(track.get("frames_since_update", 0))
@@ -1237,14 +1076,7 @@ def any_track_near_bottom(tracks: TrackMap) -> bool:
 
 
 def active_track_count(tracks: TrackMap) -> int:
-    """Ekranda güvenilir kabul edilen aktif track sayısını hesaplar.
-
-    Args:
-        tracks: Aktif track sözlüğü.
-
-    Returns:
-        Yaşı ve update sayısı yeterli olan aktif track sayısı.
-    """
+    """Count tracks reliable enough to affect detection scheduling."""
     count = 0
 
     for track in tracks.values():
@@ -1259,24 +1091,17 @@ def active_track_count(tracks: TrackMap) -> int:
     return count
 
 
+# --- YOLO scheduling ---------------------------------------------------------
+# Camera motion suppresses detection because motion blur/shift can raise false positives.
 def should_run_detection(
     frame_index: int,
     tracks: TrackMap,
     camera_moving: bool,
     force_detection: bool,
 ) -> tuple[bool, str]:
-    """Mevcut frame'de detection çalışıp çalışmayacağına karar verir.
-
-    Args:
-        frame_index: Mevcut frame index değeri.
-        tracks: Aktif track sözlüğü.
-        camera_moving: Kamera hareket halinde mi.
-        force_detection: Detection zorlanacak mı.
-
-    Returns:
-        Detection kararı ve çalışma modu.
-    """
+    """Choose whether YOLO should run on this frame and in which mode."""
     # Kamera hareketliyken detection daha fazla false positive üretebilir.
+    # During pan/zoom, KLT/FOV propagation is safer than launching a fresh detection.
     if camera_moving:
         return False, "camera_moving"
 
