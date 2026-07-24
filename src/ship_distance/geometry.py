@@ -1,33 +1,36 @@
-"""Kamera geometrisi, ufuk çizgisi ve deniz mesafesi yardımcıları.
-
-Bu modül FOV ve tilt bilgilerinden ufuk çizgisini günceller, görüntüdeki bir
-pikseli deniz yüzeyi üzerindeki yaklaşık mesafeye dönüştürür ve mesafe
-değerlerini görselleştirme için biçimlendirir.
-
-BBox boyutuna dayalı Butterfly hesabı ve iki yöntemin birleştirilmesi ayrı API
-ve tracker katmanlarında yürütülür. Böylece geometry.py yalnızca ortak kamera
-geometrisi sorumluluğunu taşır.
-"""
+"""Shared camera, horizon and sea-surface geometry helpers."""
 
 from collections import deque
 import math
+from pathlib import Path
 from typing import Any
 
+from config import AppConfig
 import numpy as np
 
 
+# --- Shared image geometry ---------------------------------------------------
+# Tracker, detector and visualizer operate in this normalized 1280x720 space.
 PROCESS_WIDTH = 1280
 PROCESS_HEIGHT = 720
 
 CX = PROCESS_WIDTH / 2.0
 CY = PROCESS_HEIGHT / 2.0
 
-CAMERA_HEIGHT_M = 10.0
+# Geometry must use the same camera height as main.py and DistanceHlApi.
+# Keeping one runtime source prevents horizon/range limits from being calculated
+# with a stale hard-coded height when config.yaml changes between recordings.
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
+CONFIG = AppConfig.from_yaml(CONFIG_PATH)
+CAMERA_HEIGHT_M = CONFIG.camera.height_m
 
 TILT_ZERO_HORIZON_DEG = 90.0
 
 # Dünya eğriliği ve atmosferik kırılma, ufuk çizgisine yakın mesafe
 # hesaplarında daha gerçekçi bir üst sınır oluşturmak için kullanılır.
+# --- Earth/refraction model --------------------------------------------------
+# REFRACTION_K increases the effective Earth radius to approximate atmospheric
+# bending close to the horizon; both horizon dip and maximum range use it.
 EARTH_RADIUS_M = 6371000.0
 REFRACTION_K = 0.13
 EFFECTIVE_EARTH_RADIUS_M = EARTH_RADIUS_M / (1.0 - REFRACTION_K)
@@ -41,6 +44,8 @@ MAX_SEA_DISTANCE_M = math.sqrt(
 
 # Ufuk çizgisine çok yakın açılar mesafe hesabında kararsız sonuç üretir.
 # Bu yüzden minimum beta açısı ve minimum geçerli mesafe sınırı kullanılır.
+# --- Validity and horizon smoothing -----------------------------------------
+# Very small depression angles amplify pixel-level error into large range error.
 MIN_BETA_RAD = math.radians(0.015)
 MIN_VALID_DISTANCE_M = 5.0
 
@@ -56,22 +61,12 @@ HORIZON_TILT_ONLY_MAX_STEP_MOVING_PX = 9.0
 HORIZON_MEDIAN_WINDOW = 21
 
 
+# --- Camera projection helpers ----------------------------------------------
 def focal_from_fov(fov_h_deg: float, fov_v_deg: float) -> tuple[float, float]:
-    """FOV değerlerinden piksel cinsinden focal length hesaplar.
-
-    Kamera kalibrasyonu doğrudan yoksa, görüntü genişliği/yüksekliği ve FOV
-    değerleri kullanılarak yaklaşık odak uzaklığı hesaplanabilir. Bu değerler
-    daha sonra piksel konumlarını açısal değerlere çevirmek için kullanılır.
-
-    Args:
-        fov_h_deg: Kameranın yatay görüş açısı.
-        fov_v_deg: Kameranın dikey görüş açısı.
-
-    Returns:
-        Yatay ve dikey focal length değerleri.
-    """
+    """Convert horizontal/vertical FOV to focal length in pixels."""
     # Pinhole kamera modeline göre focal length, görüntü boyutunun yarısının
     # yarım FOV açısının tanjantına bölünmesiyle hesaplanır.
+    # Pinhole projection: f_px = half_image_size / tan(half_FOV).
     fx_value = (PROCESS_WIDTH / 2.0) / math.tan(math.radians(fov_h_deg) / 2.0)
     fy_value = (PROCESS_HEIGHT / 2.0) / math.tan(math.radians(fov_v_deg) / 2.0)
 
@@ -79,18 +74,7 @@ def focal_from_fov(fov_h_deg: float, fov_v_deg: float) -> tuple[float, float]:
 
 
 def resolve_pitch_down_from_tilt(tilt_deg: float | None) -> float:
-    """Sensörden gelen tilt bilgisini kameranın aşağı bakış açısına çevirir.
-
-    Farklı PTZ sistemleri tilt değerini farklı aralıklarda raporlayabilir.
-    Bu fonksiyon, gelen tilt değerini mesafe hesabında kullanılabilecek
-    normalize edilmiş aşağı bakış açısına dönüştürür.
-
-    Args:
-        tilt_deg: Sensörden okunan tilt değeri. Değer yoksa None olabilir.
-
-    Returns:
-        Kameranın yaklaşık aşağı bakış açısı.
-    """
+    """Normalize PTZ tilt conventions to a downward pitch angle."""
     if tilt_deg is None:
         return 0.0
 
@@ -114,21 +98,11 @@ def resolve_pitch_down_from_tilt(tilt_deg: float | None) -> float:
     return 0.0
 
 
+# --- Sea-surface range geometry ---------------------------------------------
 def sea_distance_from_depression(alpha_rad: float) -> float | None:
-    """Aşağı bakış açısından deniz yüzeyi üzerindeki mesafeyi hesaplar.
-
-    Alpha açısı, kamera ışınının ufuk referansına göre deniz yüzeyine doğru
-    yaptığı toplam aşağı bakış açısıdır. Ufuk çizgisine eşit veya daha küçük
-    açılar fiziksel olarak güvenilir mesafe üretmez.
-
-    Args:
-        alpha_rad: Radyan cinsinden toplam aşağı bakış açısı.
-
-    Returns:
-        Metre cinsinden yaklaşık deniz mesafesi. Açı ufukta veya ufkun
-        ötesindeyse None döner.
-    """
+    """Estimate sea-surface range from a downward viewing angle."""
     # Açı ufuk çöküşünden küçükse ışın deniz yüzeyini güvenilir şekilde kesmez.
+    # A ray above/equal to the refracted horizon does not intersect the modeled sea.
     if alpha_rad <= HORIZON_DIP_RAD:
         return None
 
@@ -136,6 +110,7 @@ def sea_distance_from_depression(alpha_rad: float) -> float | None:
     radius = EFFECTIVE_EARTH_RADIUS_M
 
     # Dünya eğriliği hesaba katılarak ikinci derece denklem çözülür.
+    # Solve the ray/curved-Earth intersection. Camera height comes from config.
     disc = (radius * tan_a) ** 2 - 2.0 * radius * CAMERA_HEIGHT_M
 
     if disc <= 0.0:
@@ -147,37 +122,14 @@ def sea_distance_from_depression(alpha_rad: float) -> float | None:
 
 
 def pixel_row_to_angle(y_value: float, fy_value: float) -> float:
-    """Görüntüdeki y piksel konumunu dikey açıya çevirir.
-
-    Piksel koordinatı doğrudan metre bilgisi vermez. Bu yüzden piksel satırı,
-    kameranın dikey focal length değeriyle optik eksene göre açıya çevrilir.
-
-    Args:
-        y_value: Görüntüdeki y piksel konumu.
-        fy_value: Dikey focal length değeri.
-
-    Returns:
-        Radyan cinsinden dikey açı.
-    """
+    """Convert an image row to vertical angle relative to the optical center."""
     return math.atan((y_value - CY) / fy_value)
 
 
 def predict_horizon_y_from_tilt(
     sensor_info: dict[str, Any], pitch_bias_rad: float = 0.0
 ) -> float:
-    """Tilt ve FOV bilgileriyle ufuk çizgisinin y konumunu tahmin eder.
-
-    Ufuk çizgisi, deniz düzlemi üzerinde mesafe hesabı için temel referanstır.
-    Kamera aşağı baktıkça ufuk çizgisi görüntü içinde yukarı veya aşağı kayar.
-    Bu kayma FOV ve tilt bilgisiyle yaklaşık olarak hesaplanır.
-
-    Args:
-        sensor_info: FOV ve tilt bilgilerini içeren sensör sözlüğü.
-        pitch_bias_rad: Manuel veya geçmişten gelen pitch düzeltmesi.
-
-    Returns:
-        Ufuk çizgisinin görüntüdeki yaklaşık y piksel konumu.
-    """
+    """Predict horizon y-position from tilt, FOV and pitch bias."""
     _, fy_value = focal_from_fov(sensor_info["fov_h"], sensor_info["fov_v"])
     pitch_down = resolve_pitch_down_from_tilt(sensor_info.get("tilt"))
 
@@ -189,16 +141,10 @@ def predict_horizon_y_from_tilt(
     return CY + fy_value * math.tan(angle)
 
 
+# --- Horizon state -----------------------------------------------------------
+# Current implementation intentionally uses tilt/FOV rather than visual fitting.
 def create_horizon_state() -> dict[str, Any]:
-    """Ufuk çizgisi takibi için başlangıç durumunu oluşturur.
-
-    Ufuk çizgisi tek karelik bir değer olarak tutulmaz. Önceki y konumu, eğim,
-    geçmiş değerler ve pitch bias bilgisi state içinde saklanır. Böylece
-    frame'ler arasında daha stabil bir ufuk referansı elde edilir.
-
-    Returns:
-        Ufuk çizgisi takibi için kullanılacak state sözlüğü.
-    """
+    """Create the persistent state used by tilt-based horizon tracking."""
     return {
         "y": None,
         "slope": 0.0,
@@ -212,14 +158,7 @@ def create_horizon_state() -> dict[str, Any]:
 
 
 def clamp_horizon_y(y_value: float) -> float:
-    """Ufuk çizgisinin görüntü içinde makul bir aralıkta kalmasını sağlar.
-
-    Args:
-        y_value: Hesaplanan ufuk çizgisi y konumu.
-
-    Returns:
-        Görüntü sınırları içinde kısıtlanmış y konumu.
-    """
+    """Keep the horizon inside the usable vertical image region."""
     # Ufuk çizgisinin görüntünün tamamen dışına veya en altına kayması mesafe
     # hesabını bozacağı için değer güvenli aralıkta sınırlandırılır.
     return max(PROCESS_HEIGHT * 0.02, min(PROCESS_HEIGHT * 0.90, y_value))
@@ -228,16 +167,7 @@ def clamp_horizon_y(y_value: float) -> float:
 def limit_horizon_step(
     current_y: float, target_y: float, max_step: float
 ) -> float:
-    """Ufuk çizgisinin tek karede yapabileceği maksimum değişimi sınırlar.
-
-    Args:
-        current_y: Mevcut ufuk çizgisi y konumu.
-        target_y: Yeni hedef ufuk çizgisi y konumu.
-        max_step: Tek karede izin verilen maksimum piksel değişimi.
-
-    Returns:
-        Sınırlandırılmış yeni ufuk çizgisi y konumu.
-    """
+    """Limit the horizon's maximum per-frame vertical movement."""
     diff = target_y - current_y
 
     if diff > max_step:
@@ -256,27 +186,12 @@ def update_horizon(
     frame_index: int,
     camera_moving: bool,
 ) -> dict[str, Any]:
-    """Ufuk çizgisi durumunu günceller.
-
-    Bu sürümde ufuk çizgisi temel olarak tilt/FOV bilgisine göre güncellenir.
-    Kamera hareketliyken daha hızlı, sabitken daha yavaş yumuşatma uygulanır.
-    Böylece ufuk çizgisi hem ani sıçramalardan korunur hem de kamera hareketine
-    uyum sağlayabilir.
-
-    Args:
-        horizon_state: Önceki ufuk çizgisi bilgilerini tutan state sözlüğü.
-        gray: Mevcut gri frame. Bu akışta imza uyumluluğu için korunur.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        frame_index: İşlenen frame index değeri. İmza uyumluluğu için korunur.
-        camera_moving: Kameranın pan/zoom hareketinde olup olmadığı.
-
-    Returns:
-        Güncellenmiş ufuk state sözlüğü.
-    """
+    """Update the tilt/FOV horizon estimate with motion-aware smoothing."""
     # Bu parametreler mevcut fonksiyon imzasını korumak için bırakılmıştır.
     # Şu an ufuk güncellemesi doğrudan tilt/FOV tabanlı çalışmaktadır.
     _ = gray, frame_index
 
+    # Sensor-derived target is clamped before temporal smoothing.
     target_y = clamp_horizon_y(
         predict_horizon_y_from_tilt(
             sensor_info, horizon_state["pitch_bias_rad"]
@@ -300,6 +215,7 @@ def update_horizon(
         alpha = HORIZON_TILT_ONLY_EMA_STABLE
         max_step = HORIZON_TILT_ONLY_MAX_STEP_STABLE_PX
 
+    # EMA removes small tilt jitter; step limiting separately blocks sudden jumps.
     blended_y = (1.0 - alpha) * horizon_state["y"] + alpha * target_y
     horizon_state["y"] = clamp_horizon_y(
         limit_horizon_step(horizon_state["y"], blended_y, max_step)
@@ -315,40 +231,19 @@ def update_horizon(
 
 
 def horizon_y_at(horizon_state: dict[str, Any], x_value: float) -> float:
-    """Belirli bir x konumunda ufuk çizgisinin y değerini hesaplar.
-
-    Args:
-        horizon_state: Ufuk çizgisi y konumu ve eğimini içeren state.
-        x_value: Ufuk çizgisinin hesaplanacağı x piksel konumu.
-
-    Returns:
-        Verilen x konumundaki ufuk y değeri.
-    """
+    """Return horizon y at a requested x-position."""
     return horizon_state["y"] + horizon_state["slope"] * (x_value - CX)
 
 
+# --- Image point -> sea range ------------------------------------------------
+# This helper is still used by detector-side near/own-ship filtering.
 def sea_distance_from_image_point(
     pixel_x: float,
     pixel_y: float,
     sensor_info: dict[str, Any],
     horizon_state: dict[str, Any],
 ) -> dict[str, Any]:
-    """Görüntüdeki bir noktanın deniz yüzeyi üzerindeki mesafesini hesaplar.
-
-    Mesafe hesabı için noktanın ufuk çizgisine göre dikey açısı bulunur.
-    Daha sonra bu açı, kamera yüksekliği ve Dünya eğriliği modeliyle birlikte
-    kullanılarak yaklaşık ileri mesafe ve yanal mesafe hesaplanır.
-
-    Args:
-        pixel_x: Noktanın x piksel konumu.
-        pixel_y: Noktanın y piksel konumu.
-        sensor_info: FOV ve tilt bilgilerini içeren sensör sözlüğü.
-        horizon_state: Güncel ufuk çizgisi state bilgisi.
-
-    Returns:
-        Mesafe sonucunu, geçerlilik bilgisini, ileri/yanal bileşenleri ve
-        hesaplama yardımcı değerlerini içeren sözlük.
-    """
+    """Estimate sea-surface range and components for one image point."""
     fx_value, fy_value = focal_from_fov(
         sensor_info["fov_h"], sensor_info["fov_v"]
     )
@@ -357,6 +252,7 @@ def sea_distance_from_image_point(
 
     # Beta, seçilen pikselin ufuk çizgisine göre aşağı yönde yaptığı açıdır.
     # Nesne ufka çok yakınsa beta küçük olur ve mesafe hesabı kararsızlaşır.
+    # beta is positive below the horizon and approaches zero near the horizon.
     beta = math.atan((pixel_y - y_horizon) / fy_value)
 
     base = {
@@ -380,6 +276,7 @@ def sea_distance_from_image_point(
 
     # Toplam aşağı bakış açısı, teorik ufuk çöküşü ile pikselin ufka göre
     # ekstra aşağı açısının toplamı olarak alınır.
+    # Total depression combines geometric horizon dip with pixel depression.
     alpha = HORIZON_DIP_RAD + beta
     distance = sea_distance_from_depression(alpha)
 
@@ -393,6 +290,7 @@ def sea_distance_from_image_point(
 
     # X konumu yatay açıya çevrilir. Böylece toplam mesafe ileri ve yanal
     # bileşenlere ayrılabilir.
+    # Horizontal bearing separates slant sea range into forward/lateral components.
     phi = math.atan((pixel_x - CX) / fx_value)
     forward_m = distance * math.cos(phi)
     lateral_m = distance * math.sin(phi)
@@ -420,14 +318,7 @@ def sea_distance_from_image_point(
 
 
 def format_distance(distance_m: float | None) -> str:
-    """Mesafe değerini ekranda okunabilir metin formatına çevirir.
-
-    Args:
-        distance_m: Metre cinsinden mesafe değeri.
-
-    Returns:
-        Metre veya kilometre formatında okunabilir mesafe metni.
-    """
+    """Format a distance for the on-frame display."""
     if distance_m is None:
         return "?"
 
