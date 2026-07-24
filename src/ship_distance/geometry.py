@@ -1,41 +1,36 @@
-"""Kamera geometrisi, ufuk çizgisi ve deniz mesafesi hesaplama yardımcıları.
-
-Bu dosya, görüntü üzerindeki piksel konumlarından yaklaşık deniz mesafesi
-hesaplamak için kullanılan matematiksel yardımcı fonksiyonları içerir.
-
-İlk mesafe yöntemi, kamera yüksekliği, FOV, tilt bilgisi, ufuk çizgisi ve
-nesnenin görüntüdeki su hattı noktası üzerinden çalışır. Bu horizon/waterline
-yaklaşımı özellikle bbox su hattı hatalıysa çok hassas sonuç üretebilir.
-
-Bu yüzden ek olarak bbox piksel boyutu, FOV/zoom bilgisi ve geminin görüntüde
-kapladığı yaklaşık fiziksel boyut aralığı kullanılarak ikinci bir mesafe
-tahmini üretilir. Son aşamada horizon tabanlı mesafe ile bbox-size tabanlı
-mesafe güven skorlarına göre birleştirilir.
-"""
+"""Shared camera, horizon and sea-surface geometry helpers."""
 
 from collections import deque
 import math
-from typing import Any, TypeAlias
+from pathlib import Path
+from typing import Any
 
+from config import AppConfig
 import numpy as np
 
 
-Box: TypeAlias = tuple[float, float, float, float]
-
+# --- Shared image geometry ---------------------------------------------------
+# Tracker, detector and visualizer operate in this normalized 1280x720 space.
 PROCESS_WIDTH = 1280
 PROCESS_HEIGHT = 720
 
 CX = PROCESS_WIDTH / 2.0
 CY = PROCESS_HEIGHT / 2.0
 
-CAMERA_HEIGHT_M = 10.0
+# Geometry must use the same camera height as main.py and DistanceHlApi.
+# Keeping one runtime source prevents horizon/range limits from being calculated
+# with a stale hard-coded height when config.yaml changes between recordings.
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
+CONFIG = AppConfig.from_yaml(CONFIG_PATH)
+CAMERA_HEIGHT_M = CONFIG.camera.height_m
 
-DEFAULT_FOV_H_DEG = 65.7
-DEFAULT_FOV_V_DEG = 39.9
 TILT_ZERO_HORIZON_DEG = 90.0
 
 # Dünya eğriliği ve atmosferik kırılma, ufuk çizgisine yakın mesafe
 # hesaplarında daha gerçekçi bir üst sınır oluşturmak için kullanılır.
+# --- Earth/refraction model --------------------------------------------------
+# REFRACTION_K increases the effective Earth radius to approximate atmospheric
+# bending close to the horizon; both horizon dip and maximum range use it.
 EARTH_RADIUS_M = 6371000.0
 REFRACTION_K = 0.13
 EFFECTIVE_EARTH_RADIUS_M = EARTH_RADIUS_M / (1.0 - REFRACTION_K)
@@ -49,6 +44,8 @@ MAX_SEA_DISTANCE_M = math.sqrt(
 
 # Ufuk çizgisine çok yakın açılar mesafe hesabında kararsız sonuç üretir.
 # Bu yüzden minimum beta açısı ve minimum geçerli mesafe sınırı kullanılır.
+# --- Validity and horizon smoothing -----------------------------------------
+# Very small depression angles amplify pixel-level error into large range error.
 MIN_BETA_RAD = math.radians(0.015)
 MIN_VALID_DISTANCE_M = 5.0
 
@@ -63,78 +60,13 @@ HORIZON_TILT_ONLY_MAX_STEP_MOVING_PX = 9.0
 
 HORIZON_MEDIAN_WINDOW = 21
 
-# İlk test videosundaki hedefler küçük tekne değil, çoğunlukla büyük yük/kargo
-# gemisi görünümünde. Bu nedenle yandan görünen uzun bbox'larda gerçek görünen
-# gemi uzunluğu daha büyük kabul edilir. Önden/diyagonal görünen gemilerde ise
-# width-based hesap zaten düşük güvenle kullanılacaktır.
-SHIP_VISIBLE_LENGTH_M = 130.0
-SHIP_VISIBLE_LENGTH_MIN_M = 70.0
-SHIP_VISIBLE_LENGTH_MAX_M = 260.0
 
-# Yük gemilerinde su üstünde görünen toplam yükseklik, küçük tekneye göre daha
-# büyüktür. Height-based hesap kesin sonuç vermez ama kompakt görünümde destek
-# sinyali olarak kullanılır.
-SHIP_VISIBLE_HEIGHT_M = 26.0
-SHIP_VISIBLE_HEIGHT_MIN_M = 12.0
-SHIP_VISIBLE_HEIGHT_MAX_M = 60.0
-
-# Dar FOV/zoom durumunda horizon-only hesap birkaç piksel hatadan çok etkilenir.
-# Bu nedenle bbox-size sonucu, yeterince güvenilir olduğunda daha yüksek ağırlık
-# alır.
-SIZE_DISTANCE_MIN_VALID_M = 50.0
-SIZE_DISTANCE_MAX_VALID_M = 30000.0
-
-HORIZON_WEIGHT_DEFAULT = 0.35
-SIZE_WEIGHT_DEFAULT = 0.65
-DISAGREEMENT_RATIO_THRES = 2.2
-
-
-def clamp(value: float, min_value: float, max_value: float) -> float:
-    """Sayısal değeri verilen aralıkta sınırlar.
-
-    Args:
-        value: Sınırlandırılacak değer.
-        min_value: Alt sınır.
-        max_value: Üst sınır.
-
-    Returns:
-        Sınırlandırılmış değer.
-    """
-    return max(min_value, min(max_value, value))
-
-
-def safe_float(value: object, default: float) -> float:
-    """Herhangi bir değeri güvenli şekilde float'a çevirir.
-
-    Args:
-        value: Float'a çevrilecek ham değer.
-        default: Dönüşüm başarısız olursa kullanılacak değer.
-
-    Returns:
-        Float değer.
-    """
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
+# --- Camera projection helpers ----------------------------------------------
 def focal_from_fov(fov_h_deg: float, fov_v_deg: float) -> tuple[float, float]:
-    """FOV değerlerinden piksel cinsinden focal length hesaplar.
-
-    Kamera kalibrasyonu doğrudan yoksa, görüntü genişliği/yüksekliği ve FOV
-    değerleri kullanılarak yaklaşık odak uzaklığı hesaplanabilir. Bu değerler
-    daha sonra piksel konumlarını açısal değerlere çevirmek için kullanılır.
-
-    Args:
-        fov_h_deg: Kameranın yatay görüş açısı.
-        fov_v_deg: Kameranın dikey görüş açısı.
-
-    Returns:
-        Yatay ve dikey focal length değerleri.
-    """
+    """Convert horizontal/vertical FOV to focal length in pixels."""
     # Pinhole kamera modeline göre focal length, görüntü boyutunun yarısının
     # yarım FOV açısının tanjantına bölünmesiyle hesaplanır.
+    # Pinhole projection: f_px = half_image_size / tan(half_FOV).
     fx_value = (PROCESS_WIDTH / 2.0) / math.tan(math.radians(fov_h_deg) / 2.0)
     fy_value = (PROCESS_HEIGHT / 2.0) / math.tan(math.radians(fov_v_deg) / 2.0)
 
@@ -142,18 +74,7 @@ def focal_from_fov(fov_h_deg: float, fov_v_deg: float) -> tuple[float, float]:
 
 
 def resolve_pitch_down_from_tilt(tilt_deg: float | None) -> float:
-    """Sensörden gelen tilt bilgisini kameranın aşağı bakış açısına çevirir.
-
-    Farklı PTZ sistemleri tilt değerini farklı aralıklarda raporlayabilir.
-    Bu fonksiyon, gelen tilt değerini mesafe hesabında kullanılabilecek
-    normalize edilmiş aşağı bakış açısına dönüştürür.
-
-    Args:
-        tilt_deg: Sensörden okunan tilt değeri. Değer yoksa None olabilir.
-
-    Returns:
-        Kameranın yaklaşık aşağı bakış açısı.
-    """
+    """Normalize PTZ tilt conventions to a downward pitch angle."""
     if tilt_deg is None:
         return 0.0
 
@@ -177,21 +98,11 @@ def resolve_pitch_down_from_tilt(tilt_deg: float | None) -> float:
     return 0.0
 
 
+# --- Sea-surface range geometry ---------------------------------------------
 def sea_distance_from_depression(alpha_rad: float) -> float | None:
-    """Aşağı bakış açısından deniz yüzeyi üzerindeki mesafeyi hesaplar.
-
-    Alpha açısı, kamera ışınının ufuk referansına göre deniz yüzeyine doğru
-    yaptığı toplam aşağı bakış açısıdır. Ufuk çizgisine eşit veya daha küçük
-    açılar fiziksel olarak güvenilir mesafe üretmez.
-
-    Args:
-        alpha_rad: Radyan cinsinden toplam aşağı bakış açısı.
-
-    Returns:
-        Metre cinsinden yaklaşık deniz mesafesi. Açı ufukta veya ufkun
-        ötesindeyse None döner.
-    """
+    """Estimate sea-surface range from a downward viewing angle."""
     # Açı ufuk çöküşünden küçükse ışın deniz yüzeyini güvenilir şekilde kesmez.
+    # A ray above/equal to the refracted horizon does not intersect the modeled sea.
     if alpha_rad <= HORIZON_DIP_RAD:
         return None
 
@@ -199,6 +110,7 @@ def sea_distance_from_depression(alpha_rad: float) -> float | None:
     radius = EFFECTIVE_EARTH_RADIUS_M
 
     # Dünya eğriliği hesaba katılarak ikinci derece denklem çözülür.
+    # Solve the ray/curved-Earth intersection. Camera height comes from config.
     disc = (radius * tan_a) ** 2 - 2.0 * radius * CAMERA_HEIGHT_M
 
     if disc <= 0.0:
@@ -210,37 +122,14 @@ def sea_distance_from_depression(alpha_rad: float) -> float | None:
 
 
 def pixel_row_to_angle(y_value: float, fy_value: float) -> float:
-    """Görüntüdeki y piksel konumunu dikey açıya çevirir.
-
-    Piksel koordinatı doğrudan metre bilgisi vermez. Bu yüzden piksel satırı,
-    kameranın dikey focal length değeriyle optik eksene göre açıya çevrilir.
-
-    Args:
-        y_value: Görüntüdeki y piksel konumu.
-        fy_value: Dikey focal length değeri.
-
-    Returns:
-        Radyan cinsinden dikey açı.
-    """
+    """Convert an image row to vertical angle relative to the optical center."""
     return math.atan((y_value - CY) / fy_value)
 
 
 def predict_horizon_y_from_tilt(
     sensor_info: dict[str, Any], pitch_bias_rad: float = 0.0
 ) -> float:
-    """Tilt ve FOV bilgileriyle ufuk çizgisinin y konumunu tahmin eder.
-
-    Ufuk çizgisi, deniz düzlemi üzerinde mesafe hesabı için temel referanstır.
-    Kamera aşağı baktıkça ufuk çizgisi görüntü içinde yukarı veya aşağı kayar.
-    Bu kayma FOV ve tilt bilgisiyle yaklaşık olarak hesaplanır.
-
-    Args:
-        sensor_info: FOV ve tilt bilgilerini içeren sensör sözlüğü.
-        pitch_bias_rad: Manuel veya geçmişten gelen pitch düzeltmesi.
-
-    Returns:
-        Ufuk çizgisinin görüntüdeki yaklaşık y piksel konumu.
-    """
+    """Predict horizon y-position from tilt, FOV and pitch bias."""
     _, fy_value = focal_from_fov(sensor_info["fov_h"], sensor_info["fov_v"])
     pitch_down = resolve_pitch_down_from_tilt(sensor_info.get("tilt"))
 
@@ -252,16 +141,10 @@ def predict_horizon_y_from_tilt(
     return CY + fy_value * math.tan(angle)
 
 
+# --- Horizon state -----------------------------------------------------------
+# Current implementation intentionally uses tilt/FOV rather than visual fitting.
 def create_horizon_state() -> dict[str, Any]:
-    """Ufuk çizgisi takibi için başlangıç durumunu oluşturur.
-
-    Ufuk çizgisi tek karelik bir değer olarak tutulmaz. Önceki y konumu, eğim,
-    geçmiş değerler ve pitch bias bilgisi state içinde saklanır. Böylece
-    frame'ler arasında daha stabil bir ufuk referansı elde edilir.
-
-    Returns:
-        Ufuk çizgisi takibi için kullanılacak state sözlüğü.
-    """
+    """Create the persistent state used by tilt-based horizon tracking."""
     return {
         "y": None,
         "slope": 0.0,
@@ -275,14 +158,7 @@ def create_horizon_state() -> dict[str, Any]:
 
 
 def clamp_horizon_y(y_value: float) -> float:
-    """Ufuk çizgisinin görüntü içinde makul bir aralıkta kalmasını sağlar.
-
-    Args:
-        y_value: Hesaplanan ufuk çizgisi y konumu.
-
-    Returns:
-        Görüntü sınırları içinde kısıtlanmış y konumu.
-    """
+    """Keep the horizon inside the usable vertical image region."""
     # Ufuk çizgisinin görüntünün tamamen dışına veya en altına kayması mesafe
     # hesabını bozacağı için değer güvenli aralıkta sınırlandırılır.
     return max(PROCESS_HEIGHT * 0.02, min(PROCESS_HEIGHT * 0.90, y_value))
@@ -291,16 +167,7 @@ def clamp_horizon_y(y_value: float) -> float:
 def limit_horizon_step(
     current_y: float, target_y: float, max_step: float
 ) -> float:
-    """Ufuk çizgisinin tek karede yapabileceği maksimum değişimi sınırlar.
-
-    Args:
-        current_y: Mevcut ufuk çizgisi y konumu.
-        target_y: Yeni hedef ufuk çizgisi y konumu.
-        max_step: Tek karede izin verilen maksimum piksel değişimi.
-
-    Returns:
-        Sınırlandırılmış yeni ufuk çizgisi y konumu.
-    """
+    """Limit the horizon's maximum per-frame vertical movement."""
     diff = target_y - current_y
 
     if diff > max_step:
@@ -319,27 +186,12 @@ def update_horizon(
     frame_index: int,
     camera_moving: bool,
 ) -> dict[str, Any]:
-    """Ufuk çizgisi durumunu günceller.
-
-    Bu sürümde ufuk çizgisi temel olarak tilt/FOV bilgisine göre güncellenir.
-    Kamera hareketliyken daha hızlı, sabitken daha yavaş yumuşatma uygulanır.
-    Böylece ufuk çizgisi hem ani sıçramalardan korunur hem de kamera hareketine
-    uyum sağlayabilir.
-
-    Args:
-        horizon_state: Önceki ufuk çizgisi bilgilerini tutan state sözlüğü.
-        gray: Mevcut gri frame. Bu akışta imza uyumluluğu için korunur.
-        sensor_info: Mevcut frame'e ait sensör bilgisi.
-        frame_index: İşlenen frame index değeri. İmza uyumluluğu için korunur.
-        camera_moving: Kameranın pan/zoom hareketinde olup olmadığı.
-
-    Returns:
-        Güncellenmiş ufuk state sözlüğü.
-    """
+    """Update the tilt/FOV horizon estimate with motion-aware smoothing."""
     # Bu parametreler mevcut fonksiyon imzasını korumak için bırakılmıştır.
     # Şu an ufuk güncellemesi doğrudan tilt/FOV tabanlı çalışmaktadır.
     _ = gray, frame_index
 
+    # Sensor-derived target is clamped before temporal smoothing.
     target_y = clamp_horizon_y(
         predict_horizon_y_from_tilt(
             sensor_info, horizon_state["pitch_bias_rad"]
@@ -363,6 +215,7 @@ def update_horizon(
         alpha = HORIZON_TILT_ONLY_EMA_STABLE
         max_step = HORIZON_TILT_ONLY_MAX_STEP_STABLE_PX
 
+    # EMA removes small tilt jitter; step limiting separately blocks sudden jumps.
     blended_y = (1.0 - alpha) * horizon_state["y"] + alpha * target_y
     horizon_state["y"] = clamp_horizon_y(
         limit_horizon_step(horizon_state["y"], blended_y, max_step)
@@ -378,40 +231,19 @@ def update_horizon(
 
 
 def horizon_y_at(horizon_state: dict[str, Any], x_value: float) -> float:
-    """Belirli bir x konumunda ufuk çizgisinin y değerini hesaplar.
-
-    Args:
-        horizon_state: Ufuk çizgisi y konumu ve eğimini içeren state.
-        x_value: Ufuk çizgisinin hesaplanacağı x piksel konumu.
-
-    Returns:
-        Verilen x konumundaki ufuk y değeri.
-    """
+    """Return horizon y at a requested x-position."""
     return horizon_state["y"] + horizon_state["slope"] * (x_value - CX)
 
 
+# --- Image point -> sea range ------------------------------------------------
+# This helper is still used by detector-side near/own-ship filtering.
 def sea_distance_from_image_point(
     pixel_x: float,
     pixel_y: float,
     sensor_info: dict[str, Any],
     horizon_state: dict[str, Any],
 ) -> dict[str, Any]:
-    """Görüntüdeki bir noktanın deniz yüzeyi üzerindeki mesafesini hesaplar.
-
-    Mesafe hesabı için noktanın ufuk çizgisine göre dikey açısı bulunur.
-    Daha sonra bu açı, kamera yüksekliği ve Dünya eğriliği modeliyle birlikte
-    kullanılarak yaklaşık ileri mesafe ve yanal mesafe hesaplanır.
-
-    Args:
-        pixel_x: Noktanın x piksel konumu.
-        pixel_y: Noktanın y piksel konumu.
-        sensor_info: FOV ve tilt bilgilerini içeren sensör sözlüğü.
-        horizon_state: Güncel ufuk çizgisi state bilgisi.
-
-    Returns:
-        Mesafe sonucunu, geçerlilik bilgisini, ileri/yanal bileşenleri ve
-        hesaplama yardımcı değerlerini içeren sözlük.
-    """
+    """Estimate sea-surface range and components for one image point."""
     fx_value, fy_value = focal_from_fov(
         sensor_info["fov_h"], sensor_info["fov_v"]
     )
@@ -420,6 +252,7 @@ def sea_distance_from_image_point(
 
     # Beta, seçilen pikselin ufuk çizgisine göre aşağı yönde yaptığı açıdır.
     # Nesne ufka çok yakınsa beta küçük olur ve mesafe hesabı kararsızlaşır.
+    # beta is positive below the horizon and approaches zero near the horizon.
     beta = math.atan((pixel_y - y_horizon) / fy_value)
 
     base = {
@@ -443,6 +276,7 @@ def sea_distance_from_image_point(
 
     # Toplam aşağı bakış açısı, teorik ufuk çöküşü ile pikselin ufka göre
     # ekstra aşağı açısının toplamı olarak alınır.
+    # Total depression combines geometric horizon dip with pixel depression.
     alpha = HORIZON_DIP_RAD + beta
     distance = sea_distance_from_depression(alpha)
 
@@ -456,6 +290,7 @@ def sea_distance_from_image_point(
 
     # X konumu yatay açıya çevrilir. Böylece toplam mesafe ileri ve yanal
     # bileşenlere ayrılabilir.
+    # Horizontal bearing separates slant sea range into forward/lateral components.
     phi = math.atan((pixel_x - CX) / fx_value)
     forward_m = distance * math.cos(phi)
     lateral_m = distance * math.sin(phi)
@@ -482,517 +317,8 @@ def sea_distance_from_image_point(
     }
 
 
-def orientation_scores_from_box(box: Box) -> dict[str, float]:
-    """Bbox şekline göre yan/ön görünüm güven skorlarını hesaplar.
-
-    Bu fonksiyon gemi tipini kesin sınıflandırmaz. Sadece bbox oranından
-    width-based mesafe hesabının ne kadar güvenilir olabileceğini çıkarır.
-
-    Args:
-        box: Detection veya track bounding box değeri.
-
-    Returns:
-        Yan görünüm, ön/diyagonal görünüm ve genel bbox güven skorları.
-    """
-    x1, y1, x2, y2 = box
-
-    width = max(1.0, x2 - x1)
-    height = max(1.0, y2 - y1)
-    aspect = width / height
-    area_ratio = (width * height) / float(PROCESS_WIDTH * PROCESS_HEIGHT)
-
-    # Uzun yatay kutular geminin yandan göründüğüne dair daha güçlü sinyal verir.
-    side_score = clamp((aspect - 1.2) / 2.8, 0.0, 1.0)
-
-    # Kompakt kutular önden/diyagonal görünüm olabilir. Bu durumda gemi uzunluğu
-    # görüntüde tam görünmeyebilir ve width-based mesafe daha az güvenilir olur.
-    bow_score = clamp((1.8 - aspect) / 1.2, 0.0, 1.0)
-
-    # Çok küçük, aşırı büyük veya görüntü kenarına yapışık kutuların boyut
-    # bilgisinden mesafe çıkarmak daha risklidir.
-    size_score = clamp((area_ratio - 0.00012) / 0.014, 0.0, 1.0)
-
-    edge_penalty = 0.0
-
-    if x1 <= 2.0 or y1 <= 2.0:
-        edge_penalty += 0.25
-
-    if x2 >= PROCESS_WIDTH - 3.0 or y2 >= PROCESS_HEIGHT - 3.0:
-        edge_penalty += 0.25
-
-    bbox_score = clamp(0.30 + 0.70 * size_score - edge_penalty, 0.05, 1.0)
-
-    return {
-        "aspect": aspect,
-        "side_score": side_score,
-        "bow_score": bow_score,
-        "bbox_score": bbox_score,
-        "area_ratio": area_ratio,
-    }
-
-
-def estimate_distance_from_bbox_size(
-    box: Box, sensor_info: dict[str, Any]
-) -> dict[str, Any]:
-    """BBox piksel boyutu ve FOV değerlerinden mesafe tahmini yapar.
-
-    Burada gemi tipi kesin olarak seçilmez. Bunun yerine görünür gemi uzunluğu
-    ve görünür gemi yüksekliği için makul aralıklar kullanılır. Yan görünüm
-    güvenliyse width-based mesafe daha fazla ağırlık alır; kompakt/önden görünüm
-    varsa height-based mesafe daha fazla korunur.
-
-    Args:
-        box: Detection veya track bounding box değeri.
-        sensor_info: FOV/zoom bilgilerini içeren sensör sözlüğü.
-
-    Returns:
-        Bbox-size tabanlı mesafe tahmini ve güven yardımcı değerleri.
-    """
-    x1, y1, x2, y2 = box
-
-    width_px = max(1.0, x2 - x1)
-    height_px = max(1.0, y2 - y1)
-
-    fov_h = safe_float(sensor_info.get("fov_h"), DEFAULT_FOV_H_DEG)
-    fov_v = safe_float(sensor_info.get("fov_v"), DEFAULT_FOV_V_DEG)
-    fx_value, fy_value = focal_from_fov(fov_h, fov_v)
-
-    scores = orientation_scores_from_box(box)
-
-    # Yan görünümde görünen genişlik geminin gerçek uzunluğuna daha yakındır.
-    # Önden/diyagonal görünümde ise gemi uzunluğu görüntüye yansımaz; bu yüzden
-    # width-based ağırlık düşürülür.
-    width_confidence = clamp(0.10 + 0.75 * scores["side_score"], 0.10, 0.85)
-
-    # Height-based hesap tek başına kesin değildir ama önden/diyagonal görünümde
-    # width-based hesaba göre daha stabil olabilir.
-    height_confidence = clamp(0.25 + 0.35 * scores["bow_score"], 0.20, 0.60)
-
-    width_distance = SHIP_VISIBLE_LENGTH_M * fx_value / width_px
-    width_min = SHIP_VISIBLE_LENGTH_MIN_M * fx_value / width_px
-    width_max = SHIP_VISIBLE_LENGTH_MAX_M * fx_value / width_px
-
-    height_distance = SHIP_VISIBLE_HEIGHT_M * fy_value / height_px
-    height_min = SHIP_VISIBLE_HEIGHT_MIN_M * fy_value / height_px
-    height_max = SHIP_VISIBLE_HEIGHT_MAX_M * fy_value / height_px
-
-    total_weight = width_confidence + height_confidence
-
-    if total_weight <= 0.0:
-        return {
-            "valid": False,
-            "reason": "bbox_size_weight_zero",
-            "distance": None,
-            "confidence": 0.0,
-        }
-
-    size_distance = (
-        width_distance * width_confidence + height_distance * height_confidence
-    ) / total_weight
-
-    min_distance = min(width_min, height_min)
-    max_distance = max(width_max, height_max)
-
-    confidence = clamp(
-        scores["bbox_score"]
-        * (0.35 + 0.65 * max(width_confidence, height_confidence)),
-        0.05,
-        0.95,
-    )
-
-    if (
-        not SIZE_DISTANCE_MIN_VALID_M
-        <= size_distance
-        <= SIZE_DISTANCE_MAX_VALID_M
-    ):
-        return {
-            "valid": False,
-            "reason": "bbox_size_distance_out_of_range",
-            "distance": None,
-            "confidence": confidence,
-            "width_distance": width_distance,
-            "height_distance": height_distance,
-        }
-
-    return {
-        "valid": True,
-        "reason": "bbox_size_ok",
-        "distance": size_distance,
-        "confidence": confidence,
-        "min_distance": min_distance,
-        "max_distance": max_distance,
-        "width_distance": width_distance,
-        "height_distance": height_distance,
-        "width_confidence": width_confidence,
-        "height_confidence": height_confidence,
-        **scores,
-    }
-
-
-def horizon_confidence_from_result(
-    horizon_result: dict[str, Any], sensor_info: dict[str, Any]
-) -> float:
-    """Horizon/waterline sonucunun güven skorunu hesaplar.
-
-    Args:
-        horizon_result: sea_distance_from_image_point çıktısı.
-        sensor_info: FOV/zoom bilgilerini içeren sensör sözlüğü.
-
-    Returns:
-        0-1 arası güven skoru.
-    """
-    if not horizon_result.get("valid"):
-        return 0.0
-
-    beta_deg = abs(safe_float(horizon_result.get("beta_deg"), 0.0))
-    fov_h = safe_float(sensor_info.get("fov_h"), DEFAULT_FOV_H_DEG)
-
-    # Dar FOV'da birkaç piksel su hattı hatası mesafeyi çok değiştirdiği için
-    # horizon-only güveni düşük tutulur.
-    if fov_h < 5.0:
-        base_confidence = 0.20
-    elif fov_h < 15.0:
-        base_confidence = 0.30
-    else:
-        base_confidence = 0.45
-
-    # Ufka çok yakın beta da, çok büyük beta da hassasiyet açısından risklidir.
-    if beta_deg < 0.03:
-        beta_factor = 0.55
-    elif beta_deg < 0.10:
-        beta_factor = 0.90
-    elif beta_deg < 0.35:
-        beta_factor = 0.75
-    else:
-        beta_factor = 0.45
-
-    return clamp(base_confidence * beta_factor, 0.05, 0.55)
-
-
-def weighted_log_average(
-    value_a: float, weight_a: float, value_b: float, weight_b: float
-) -> float:
-    """İki pozitif mesafeyi logaritmik ağırlıklı ortalama ile birleştirir.
-
-    Mesafeler kilometre ölçeğinde çarpansal hata ürettiği için aritmetik ortalama
-    bazen kötü davranır. Logaritmik ortalama oran farklarını daha dengeli işler.
-
-    Args:
-        value_a: İlk pozitif mesafe.
-        weight_a: İlk mesafe ağırlığı.
-        value_b: İkinci pozitif mesafe.
-        weight_b: İkinci mesafe ağırlığı.
-
-    Returns:
-        Birleştirilmiş pozitif mesafe.
-    """
-    total_weight = max(weight_a + weight_b, 1e-6)
-
-    return math.exp(
-        (math.log(value_a) * weight_a + math.log(value_b) * weight_b)
-        / total_weight
-    )
-
-
-def apply_narrow_fov_size_penalty(
-    size_result: dict[str, Any], box: Box, sensor_info: dict[str, Any]
-) -> dict[str, Any]:
-    """Dar FOV / zoomlu görüntülerde bbox-size güvenini düşürür.
-
-    Dar FOV görüntülerde kamera nesneye daha yakın veya daha zoomlu bakar.
-    Bu durumda YOLO, geminin tamamı yerine kabin/gövde gibi sadece bir bölümünü
-    kutuya alabilir. Bbox küçük veya kısmi kaldığında pinhole/bbox-size hesabı
-    mesafeyi gereğinden büyük üretir.
-
-    Bu fonksiyon önceki videolardaki geniş FOV davranışını bozmaz. Sadece FOV
-    gerçekten dar olduğunda veya zoom yüksek olduğunda size-confidence değerini
-    düşürür. Final mesafede horizon/waterline hesabı daha fazla korunur.
-
-    Args:
-        size_result: estimate_distance_from_bbox_size çıktısı.
-        box: Detection veya track bounding box değeri.
-        sensor_info: FOV/zoom bilgilerini içeren sensör sözlüğü.
-
-    Returns:
-        Gerekirse confidence değeri düşürülmüş bbox-size sonucu.
-    """
-    if not size_result.get("valid"):
-        return size_result
-
-    x1, y1, x2, y2 = box
-
-    box_width = max(1.0, x2 - x1)
-    box_height = max(1.0, y2 - y1)
-    box_area_ratio = (box_width * box_height) / float(
-        PROCESS_WIDTH * PROCESS_HEIGHT
-    )
-
-    fov_h = safe_float(sensor_info.get("fov_h"), DEFAULT_FOV_H_DEG)
-    fov_v = safe_float(sensor_info.get("fov_v"), DEFAULT_FOV_V_DEG)
-    zoom = safe_float(sensor_info.get("zoom"), 0.0)
-
-    confidence = safe_float(size_result.get("confidence"), 0.0)
-
-    is_narrow_fov = fov_h <= 12.0 or fov_v <= 9.0 or zoom >= 0.85
-    is_very_narrow_fov = fov_h <= 9.0 or fov_v <= 7.0
-    is_large_close_bbox = box_area_ratio >= 0.040
-    is_partial_bbox = box_width < PROCESS_WIDTH * 0.50
-    is_edge_touched = (
-        x1 <= 2.0
-        or y1 <= 2.0
-        or x2 >= PROCESS_WIDTH - 3.0
-        or y2 >= PROCESS_HEIGHT - 3.0
-    )
-
-    penalty_factor = 1.0
-    reason = None
-
-    if is_very_narrow_fov and is_large_close_bbox:
-        # Termal yakın/zoomlu görüntüde bbox çoğu zaman geminin tüm uzunluğunu
-        # değil, sadece gövde/kabin parçasını içerir. Bu durumda size-distance
-        # fazla uzak sonuç verir.
-        penalty_factor = 0.35
-        reason = "very_narrow_fov_large_bbox"
-    elif is_narrow_fov and is_large_close_bbox:
-        penalty_factor = 0.45
-        reason = "narrow_fov_large_bbox"
-    elif is_narrow_fov and is_partial_bbox:
-        penalty_factor = 0.60
-        reason = "narrow_fov_partial_bbox"
-
-    if is_narrow_fov and is_edge_touched:
-        penalty_factor = min(penalty_factor, 0.55)
-        reason = "narrow_fov_edge_bbox"
-
-    if reason is None:
-        return size_result
-
-    adjusted_confidence = clamp(confidence * penalty_factor, 0.02, 0.95)
-
-    return {
-        **size_result,
-        "confidence": adjusted_confidence,
-        "narrow_fov_penalty": True,
-        "narrow_fov_penalty_factor": penalty_factor,
-        "narrow_fov_reason": reason,
-    }
-
-
-def fuse_horizon_and_size_distance(
-    horizon_result: dict[str, Any],
-    size_result: dict[str, Any],
-    sensor_info: dict[str, Any],
-) -> dict[str, Any]:
-    """Horizon ve bbox-size mesafe sonuçlarını tek tahmine indirger.
-
-    Args:
-        horizon_result: Horizon/waterline tabanlı mesafe çıktısı.
-        size_result: Bbox-size tabanlı mesafe çıktısı.
-        sensor_info: FOV/zoom bilgilerini içeren sensör sözlüğü.
-
-    Returns:
-        Hibrit mesafe sonucu.
-    """
-    horizon_valid = bool(horizon_result.get("valid"))
-    size_valid = bool(size_result.get("valid"))
-
-    horizon_distance = horizon_result.get("distance")
-    size_distance = size_result.get("distance")
-
-    horizon_confidence = horizon_confidence_from_result(
-        horizon_result, sensor_info
-    )
-    size_confidence = safe_float(size_result.get("confidence"), 0.0)
-
-    # Sadece bbox-size hesabı geçerliyse, sonucu doğrudan bbox-size mesafeden
-    # üretiriz. Bu durum waterline/ufuk hesabının geçersiz kaldığı ama bbox
-    # boyutunun kullanılabilir olduğu karelerde oluşabilir.
-    if size_valid and not horizon_valid:
-        return {
-            **horizon_result,
-            "valid": True,
-            "reason": "size_only",
-            "distance": size_distance,
-            "raw_distance": size_distance,
-            "horizon_distance": None,
-            "size_distance": size_distance,
-            "distance_source": "size_only",
-            "distance_confidence": size_confidence,
-            "size_result": size_result,
-        }
-
-    # Sadece horizon hesabı geçerliyse eski davranış korunur.
-    if horizon_valid and not size_valid:
-        return {
-            **horizon_result,
-            "horizon_distance": horizon_distance,
-            "size_distance": None,
-            "distance_source": "horizon_only",
-            "distance_confidence": horizon_confidence,
-            "size_result": size_result,
-        }
-
-    # İki yöntem de geçerli değilse bu track için mesafe üretilemez.
-    if not horizon_valid or not size_valid:
-        return {
-            **horizon_result,
-            "valid": False,
-            "reason": "no_valid_distance",
-            "distance": None,
-            "horizon_distance": None,
-            "size_distance": None,
-            "distance_source": "none",
-            "distance_confidence": 0.0,
-            "size_result": size_result,
-        }
-
-    horizon_distance_float = float(horizon_distance)
-    size_distance_float = float(size_distance)
-
-    ratio = max(horizon_distance_float, size_distance_float) / max(
-        min(horizon_distance_float, size_distance_float), 1.0
-    )
-
-    if ratio > DISAGREEMENT_RATIO_THRES:
-        # Dar FOV/zoom kayıtlarında horizon tabanlı hesap birkaç piksel waterline
-        # hatasından etkilenebilir. Ancak bbox-size sonucunu da kör şekilde
-        # baskın yapmıyoruz. YOLO geminin tamamını değil, sadece bir kısmını
-        # kutuya aldıysa bbox küçük kalır ve size-distance mesafeyi gereğinden
-        # fazla büyütür.
-        #
-        # Bu nedenle size ağırlığı sabit değil; size confidence değerine göre
-        # kademeli verilir. Güven düşükse horizon sonucu daha fazla korunur.
-        if size_confidence >= 0.60:
-            size_weight = 0.82
-            horizon_weight = 0.18
-            reason = "size_dominant_high_confidence"
-        elif size_confidence >= 0.42:
-            size_weight = 0.72
-            horizon_weight = 0.28
-            reason = "size_dominant_medium_confidence"
-        elif size_confidence >= 0.30:
-            size_weight = 0.62
-            horizon_weight = 0.38
-            reason = "size_dominant_low_confidence"
-        else:
-            size_weight = SIZE_WEIGHT_DEFAULT
-            horizon_weight = HORIZON_WEIGHT_DEFAULT
-            reason = "hybrid_disagreement_low_confidence"
-    else:
-        # İki yöntem birbirine yakınsa güven skorlarıyla ağırlıklandırılır.
-        # Bu durumda horizon sonucu tamamen atılmaz.
-        size_weight = SIZE_WEIGHT_DEFAULT * size_confidence
-        horizon_weight = HORIZON_WEIGHT_DEFAULT * horizon_confidence
-        reason = "hybrid_agree"
-
-    fused_distance = weighted_log_average(
-        horizon_distance_float,
-        horizon_weight,
-        size_distance_float,
-        size_weight,
-    )
-
-    confidence = clamp(
-        0.5 * size_confidence + 0.5 * horizon_confidence, 0.05, 0.95
-    )
-
-    return {
-        **horizon_result,
-        "valid": True,
-        "reason": reason,
-        "distance": fused_distance,
-        "raw_distance": fused_distance,
-        "horizon_distance": horizon_distance_float,
-        "size_distance": size_distance_float,
-        "distance_source": "hybrid",
-        "distance_confidence": confidence,
-        "horizon_confidence": horizon_confidence,
-        "size_confidence": size_confidence,
-        "size_result": size_result,
-    }
-
-
-def water_point_from_box_for_geometry(
-    box: Box, sensor_info: dict[str, Any]
-) -> tuple[float, float]:
-    """Geometry içinde bbox su hattı noktasını hesaplar.
-
-    Dar FOV / zoomlu termal görüntülerde bbox çoğu zaman geminin üst gövde
-    bölümüne oturur. Bu yüzden su hattı noktası bbox içinde daha aşağıdan
-    alınır. Geniş FOV davranışı korunur; önceki videolardaki ana RGB/uzak gemi
-    hesapları bu değişiklikten etkilenmez.
-
-    Args:
-        box: Detection veya track bounding box değeri.
-        sensor_info: FOV/zoom bilgilerini içeren sensör sözlüğü.
-
-    Returns:
-        Su hattı x ve y piksel koordinatı.
-    """
-    x1, y1, x2, y2 = box
-
-    width = max(1.0, x2 - x1)
-    height = max(1.0, y2 - y1)
-    area_ratio = (width * height) / float(PROCESS_WIDTH * PROCESS_HEIGHT)
-
-    fov_h = safe_float(sensor_info.get("fov_h"), DEFAULT_FOV_H_DEG)
-    fov_v = safe_float(sensor_info.get("fov_v"), DEFAULT_FOV_V_DEG)
-    zoom = safe_float(sensor_info.get("zoom"), 0.0)
-
-    is_narrow_fov = fov_h <= 12.0 or fov_v <= 9.0 or zoom >= 0.85
-    is_large_close_bbox = area_ratio >= 0.040
-
-    if is_narrow_fov and is_large_close_bbox:
-        # Yakın/zoomlu termal görüntüde kutu geminin tamamını değil üst kısmını
-        # içerebilir. Su hattını bbox altına daha yakın almak, aynı geminin RGB
-        # sonucundan gereksiz uzak görünmesini azaltır.
-        ratio = 0.96
-    elif is_narrow_fov:
-        ratio = 0.92
-    elif fov_h < 15.0:
-        ratio = 0.88
-    else:
-        ratio = 0.90
-
-    return (x1 + x2) / 2.0, y1 + ratio * height
-
-
-def estimate_hybrid_distance_from_box(
-    box: Box, sensor_info: dict[str, Any], horizon_state: dict[str, Any]
-) -> dict[str, Any]:
-    """BBox, FOV/zoom ve horizon bilgisinden hibrit mesafe hesaplar.
-
-    Args:
-        box: Detection veya track bounding box değeri.
-        sensor_info: FOV/zoom bilgilerini içeren sensör sözlüğü.
-        horizon_state: Güncel ufuk çizgisi state bilgisi.
-
-    Returns:
-        Horizon-only ve bbox-size sonuçlarını içeren hibrit mesafe sözlüğü.
-    """
-    water_x, water_y = water_point_from_box_for_geometry(box, sensor_info)
-
-    horizon_result = sea_distance_from_image_point(
-        water_x, water_y, sensor_info, horizon_state
-    )
-
-    size_result = estimate_distance_from_bbox_size(box, sensor_info)
-    size_result = apply_narrow_fov_size_penalty(size_result, box, sensor_info)
-
-    return fuse_horizon_and_size_distance(
-        horizon_result, size_result, sensor_info
-    )
-
-
 def format_distance(distance_m: float | None) -> str:
-    """Mesafe değerini ekranda okunabilir metin formatına çevirir.
-
-    Args:
-        distance_m: Metre cinsinden mesafe değeri.
-
-    Returns:
-        Metre veya kilometre formatında okunabilir mesafe metni.
-    """
+    """Format a distance for the on-frame display."""
     if distance_m is None:
         return "?"
 
