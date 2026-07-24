@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from config import AppConfig
 import cv2
+
+from config import AppConfig
 from distance_butterfly_api import DistanceButterflyApi
 from distance_hl_api import DistanceHlApi
 from sensor_reader import load_sensor_csv
@@ -26,6 +27,7 @@ except ImportError:
     YOLO_AVAILABLE = False
 
 
+# Resolve configuration relative to the repository, not the current shell path.
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "config.yaml"
 CONFIG = AppConfig.from_yaml(CONFIG_PATH)
 
@@ -45,8 +47,6 @@ SAVE_OUTPUT_VIDEO = True
 SHOW_WINDOW = True
 
 YOLO_MODEL_PATH = CONFIG.model.yolo_path
-YOLO_DEVICE = 0 if CUDA_AVAILABLE else "cpu"
-YOLO_HALF = CUDA_AVAILABLE
 
 
 def get_video_fps(capture: cv2.VideoCapture, fallback: float = 25.0) -> float:
@@ -80,7 +80,7 @@ def main() -> None:
     print("YOLO modeli yukleniyor...")
     model = YOLO(YOLO_MODEL_PATH)
     print("YOLO modeli hazir.")
-    print(f"Device: {YOLO_DEVICE} | Half: {YOLO_HALF}")
+    print(f"CUDA available: {CUDA_AVAILABLE}")
 
     # İki mesafe yöntemi bir kez oluşturulur ve bütün karelerde yeniden kullanılır.
     distance_hl_api = DistanceHlApi()
@@ -98,6 +98,7 @@ def main() -> None:
         rgb_cap.release()
         return
 
+    # RGB FPS is the common timing reference for tracking/range smoothing.
     video_fps = get_video_fps(rgb_cap)
 
     output_video_path = Path(OUTPUT_DIR) / OUTPUT_VIDEO_NAME
@@ -139,6 +140,8 @@ def main() -> None:
             rgb_ret, rgb_frame = rgb_cap.read()
             thermal_ret, thermal_frame = thermal_cap.read()
 
+            # Continue while at least one stream still has frames. A finished
+            # stream is represented as None so the other channel can complete.
             if not rgb_ret and not thermal_ret:
                 break
 
@@ -148,8 +151,12 @@ def main() -> None:
             if not thermal_ret:
                 thermal_frame = None
 
+            # Processing FPS is display-only; video_fps above drives temporal math.
             current_tick = cv2.getTickCount()
-            fps = cv2.getTickFrequency() / max(current_tick - previous_tick, 1)
+            fps = cv2.getTickFrequency() / max(
+                current_tick - previous_tick,
+                1,
+            )
             previous_tick = current_tick
 
             # API nesneleri ve kamera yüksekliği takip katmanına iletilir.
@@ -195,6 +202,7 @@ def main() -> None:
                 thermal_moving,
             )
 
+            # Visualization is intentionally downstream of detection/tracking.
             combined = make_side_by_side(rgb_output, thermal_output)
 
             if writer is not None:
